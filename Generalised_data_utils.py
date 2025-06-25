@@ -1805,7 +1805,7 @@ def merge_list_columns_by_key(target_df: pd.DataFrame,
                                add_uncommon: bool = False,
                                ) -> Tuple[pd.DataFrame, Dict[int, int]]:
     """
-    Merge list type column values in `target_df` using matching keys from `reference_df`.
+    Merge list-type column values in `target_df` using matching keys from `reference_df`.
 
     Args:
         target_df (pd.DataFrame): The DataFrame to be updated.
