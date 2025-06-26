@@ -454,11 +454,13 @@ class Trainer_functions:
                     loss_save_filename: str = 'loss_acc_file',
                     best_model_savename: str = 'best_model',
                     description_savename: str = 'description.txt',
-                    DATETIME: str = datetime_now(path=False),
                     tqdm_write: bool = False,
                     standardscaler: Any = None,
                     save_model_wrt: str = 'loss', # 'loss' or 'accuracy'
                     more_description = '',
+                    DATETIME: str = datetime_now(path=False)[0],
+                    date: str = datetime_now(path=False)[1],
+                    time: str = datetime_now(path=False)[2],
                     device: Any = torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
                     ) -> tuple[List[float], nn.Module]:
         
@@ -508,14 +510,10 @@ class Trainer_functions:
             NameError: If `save_model_wrt` is not 'loss' or 'accuracy'.
         """
         
-        datetime_ = re.sub(r'[\[\]]', '', DATETIME)
-        datetime_ = datetime_.replace('/', '')
-        datetime_ = datetime_.replace(':', '_')
-        datetime_ = datetime_.replace(' ', '_')   
-        
-        models_savepath = create_folder(f"{results_savepath}/cache/{datetime_}/models")
+        results_savepath = f"{results_savepath}/cache/{date}/{time}"
+        models_savepath = create_folder(f"{results_savepath}/models")
         best_model_savepath = f"{models_savepath}/{best_model_savename}"
-        results_savepath = f"{results_savepath}/cache/{datetime_}"
+        
         num_train = len(train_loader.dataset)
         num_test = len(test_loader.dataset)
         num_val = len(val_loader.dataset)
@@ -533,6 +531,7 @@ class Trainer_functions:
                     f"{'    Python Compiler':35}: {platform.python_compiler()}\n"
                     f"{'    Python Architecture':35}: {platform.architecture()}\n"
                     f"{'    Hostname':35}: {platform.node()}\n"
+                    f"{'-'*60}\n"
                     f"{'    Model':35}: {model.__class__.__name__}\n"
                     f"{'    Device':35}: {device}\n"
                     f"{'    Epochs':35}: {num_epochs}\n"
@@ -553,7 +552,7 @@ class Trainer_functions:
                     f"{'-'*60}\n"
                     f"{'    Train Set':35}: {num_train} samples\n"
                     f"{'    Validation Set':35}: {num_val} samples\n"
-                    f"{'    Test Set':35}: {num_test} samples\n"
+                    f"{'    Test Set':35}: {num_test} samples\n\n"
                     f"{'    Train-Test Subset':35}: {int(num_train * subset_ratio)} samples\n"
                     f"{'    Val-Test Subset':35}: {int(num_val * subset_ratio)} samples\n"
                     f"{'    Test-Test Subset':35}: {int(num_test * subset_ratio)} samples\n"
@@ -623,7 +622,7 @@ class Trainer_functions:
             test_acc_list[epoch] = round(test_acc, 2)
             val_acc_list[epoch] = round(val_acc, 2)
             lr_list[epoch] = optimizer.param_groups[0]['lr']
-            time_list[epoch] = datetime_now(path=False)
+            time_list[epoch] = datetime_now(path=False)[0]
             
             epoch_train_losses[epoch] = round(epoch_train_loss, 6)
             epoch_test_losses[epoch] = round(epoch_test_loss, 6)
@@ -677,8 +676,8 @@ class Trainer_functions:
             # Update tqdm progress bar with accs
             if tqdm_write:
                 tqdm.write(f"At {time_list[epoch]}  Epoch {epoch+1}/{num_epochs} - "
-                        f"Train Loss: {epoch_train_loss:.4f}| Val Loss: {epoch_val_loss:.4f}| Test Loss: {epoch_test_loss:.4f}| "
-                        f"Train Acc: {train_acc:.2f}| Val Acc: {val_acc:.2f}| Test Acc: {test_acc:.2f}")
+                        f"Train Loss: {epoch_train_loss:.4f} | Val Loss: {epoch_val_loss:.4f} | Test Loss: {epoch_test_loss:.4f} | "
+                        f"Train Acc: {train_acc:.2f} | Val Acc: {val_acc:.2f} | Test Acc: {test_acc:.2f}")
             
             # Set postfix in tqdm bar for live update
             progress_bar.set_postfix({"Train Loss": f"{epoch_train_loss:.4f}", "Val Loss": f"{epoch_val_loss:.4f}", "Test Loss": f"{epoch_test_loss:.4f}",
@@ -1266,6 +1265,7 @@ class NN_Trainer():
                 train_loader: DataLoader[Dict[str, torch.Tensor]],
                 val_loader: DataLoader[Dict[str, torch.Tensor]],
                 test_loader: DataLoader[Dict[str, torch.Tensor]],
+                
                 optimizer_name: str='adam',
                 optimizer_kwargs: Dict[str, Any]={'betas':(0.9, 0.999), 'eps':1e-08, 'weight_decay':0, 'maximize':False},
                 learning_rate: float = 1e-4,
@@ -1276,25 +1276,31 @@ class NN_Trainer():
                 schedulers_kwargs: dict = {},
                 early_stop: bool = False,
                 early_stop_kwargs: dict = {},
+                
                 num_epochs: int = 100,
                 batch_size: int = 128,
                 subset_ratio: int = 1,
+                save_model_per_epoch: int = 50,
+                save_model_wrt: str = 'loss', # 'loss' or 'accuracy'
+                
+                results_savepath: str = '.',
+                description_savename: str = 'description.txt',
+                model_save_name: str = 'Untitled_model',
+                save_image_filename: str = 'loss_acc_plot',
+                loss_save_filename: str = 'loss_acc_file',
+                more_description: str = '',
+                
+                tqdm_write: bool = False,
+                standardscaler: Any = None,
+                DATETIME: str = datetime_now(path=False)[0],
+                date: str = datetime_now(path=False)[1],
+                time: str = datetime_now(path=False)[2],
+                
                 xlabel: str = 'Epoch',
                 ylabel_acc: str = 'r2_value',
                 ylabel_loss: str = 'Loss_value',
                 title: str = 'Loss and Accuracy Plot',
-                description_savename: str = 'description.txt',
-                save_image_filename: str = './loss_acc_plot',
-                loss_save_filename: str = './loss_acc_file',
-                save_model_wrt: str = 'loss', # 'loss' or 'accuracy'
                 device: Any = torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
-                save_model_per_epoch: int = 50,
-                result_savepath: str = './results/',
-                model_save_name: str = '',
-                DATETIME: str = datetime_now(),
-                tqdm_write: bool = False,
-                standardscaler: Any = None,
-                more_description: str = '',
                 ):
         """
         Initializes the NN_Trainer class with configuration for training, testing, and evaluating a PyTorch neural network.
@@ -1350,7 +1356,7 @@ class NN_Trainer():
         self.learning_rate = learning_rate
         self.save_model_per_epoch = save_model_per_epoch
         self.model_save_name = model_save_name
-        self.result_savepath = result_savepath
+        self.results_savepath = results_savepath
         self.best_model_save_name = ''.join(['best_network',
                                              '_lr_', str(self.learning_rate).replace('.', '_').replace('-', '_'),
                                              '_batsz_', str(self.batch_size),
@@ -1373,7 +1379,6 @@ class NN_Trainer():
         self.save_image_filename = save_image_filename
         self.loss_save_filename = loss_save_filename
         self.save_model_wrt = save_model_wrt
-        self.result_savepath = './results/'
         self.device = device
         self.num_train = len(self.train_loader.dataset)
         self.num_test = len(self.test_loader.dataset)
@@ -1383,10 +1388,9 @@ class NN_Trainer():
         self.more_description = more_description,
         self.create_description()
         
-        datetime_ = re.sub(r'[\[\]]', '', DATETIME)
-        datetime_ = datetime_.replace('/', '')
-        datetime_ = datetime_.replace(':', '_')
-        self.datetime = datetime_.replace(' ', '_')
+        self.results_savepath = f"{self.results_savepath}/cache/{date}/{time}"
+        self.models_savepath = create_folder(f"{self.results_savepath}/models")
+        self.datetime = DATETIME
         
     def __str__(self):
         """
@@ -1397,7 +1401,7 @@ class NN_Trainer():
         out =  (
                 f"NN_Trainer Configuration\n"
                 f"{'-'*50}\n"
-                f"{'    Date':35} : {self.DATETIME}\n"
+                f"{'    Date':35} : {self.datetime}\n"
                 f"{'    torch_version':35}: {torch.__version__}\n"
                 f"{'    platform':35}: {platform.platform()}\n"
                 f"{'    OS':35}: {platform.system()} {platform.release()}\n"
@@ -1406,6 +1410,7 @@ class NN_Trainer():
                 f"{'    Python Compiler':35}: {platform.python_compiler()}\n"
                 f"{'    Python Architecture':35}: {platform.architecture()}\n"
                 f"{'    Hostname':35}: {platform.node()}\n"
+                f"{'-'*60}\n"
                 f"{'    Model':35} : {self.network.__class__.__name__}\n"
                 f"{'    Device':35} : {self.device}\n"
                 f"{'    Epochs':35} : {self.num_epochs}\n"
@@ -1420,6 +1425,7 @@ class NN_Trainer():
                 f"{'    Early Stopping':35} : {'Enabled' if self.early_stop else 'Disabled'}\n"
                 f"{'    Early Stop Arguments':35} : {self.early_stop_kwargs if self.early_stop else 'N/A'}\n"
                 f"{'    Results Save Path':35} : {self.result_savepath}\n"
+                f"{'    Models Save Path':35} : {self.models_savepath}\n"
                 f"{'    Save Model Based On':35} : {self.save_model_wrt}\n"
                 f"{'    Best Model File Name':35} : {self.best_model_savename}\n"
                 f"{'    Output Plot Filename':35} : {self.save_image_filename}.png\n"
@@ -1434,13 +1440,37 @@ class NN_Trainer():
                 f"{'-'*50}\n"
                 f"{'    Train Set':35} : {self.num_train} samples\n"
                 f"{'    Validation Set':35} : {self.num_val} samples\n"
-                f"{'    Test Set':35} : {self.num_test} samples\n"
+                f"{'    Test Set':35} : {self.num_test} samples\n\n"
                 f"{'    Train-Test Subset':35} : {int(self.num_train * self.subset_ratio)} samples\n"
                 f"{'    Val-Test Subset':35} : {int(self.num_val * self.subset_ratio)} samples\n"
                 f"{'    Test-Test Subset':35} : {int(self.num_test * self.subset_ratio)} samples\n"
             )
         
         return out + '\n' + '-'*80 + '\n' + '='*80 + '\n' + self.more_description
+    
+    def __repr__(self):
+        """
+        Developer-focused representation: full instantiation parameters for debugging. 
+        Should ideally be valid Python code that recreates the object "(eval(repr(obj)))".
+        """
+        out =  (
+            f"{self.__class__.__name__}(\n"
+            f"  network={self.network.__class__.__name__},\n"
+            f"  optimizer='{self.optimizer_name}',\n"
+            f"  learning_rate={self.learning_rate},\n"
+            f"  loss='{self.loss_name}',\n"
+            f"  scheduler='{self.scheduler_name}',\n"
+            f"  early_stop={self.early_stop},\n"
+            f"  num_epochs={self.num_epochs},\n"
+            f"  batch_size={self.batch_size},\n"
+            f"  device='{self.device}',\n"
+            f"  save_model_per_epoch={self.save_model_per_epoch},\n"
+            f"  save_model_wrt='{self.save_model_wrt}',\n"
+            f"  model_save_name='{self.model_save_name}'\n"
+            f")"
+        )
+        
+        return out
     
     def create_description(self):
         """
@@ -1724,9 +1754,9 @@ class NN_Trainer():
         Returns:
             None
         """
-        network_save_filename = f"{self.result_savepath}/{network_save_filename}.pt"
-        # print(f'Saving network in: "{network_save_filename}')
-        
+        network_save_filename = f"{self.models_savepath}/{network_save_filename}.pt"
+        print(f'Saving network in: "{network_save_filename}"')
+
         source_file = os.path.abspath(__file__)
         with open(source_file, 'rb') as fp:
             file_ = fp.read()
@@ -1874,7 +1904,7 @@ class NN_Trainer():
             self.test_acc_list[epoch] = round(test_acc, 2)
             self.val_acc_list[epoch] = round(val_acc, 2)
             self.lr_list[epoch] = self.optimizer.param_groups[0]['lr']
-            self.time_list[epoch] = datetime_now(path=False)
+            self.time_list[epoch] = datetime_now(path=False)[0]
             
             self.epoch_train_losses[epoch] = round(epoch_train_loss, 6)
             self.epoch_test_losses[epoch] = round(epoch_test_loss, 6)
@@ -1897,7 +1927,7 @@ class NN_Trainer():
                 model_acc = val_acc
                 
             if (epoch % self.save_model_per_epoch == 0):
-                model_save_name = f'model_at_epoch_{self.epoch}'
+                model_save_name = f'{self.model_save_name}_model_at_epoch_{self.epoch}'
                 self.save_network(network_save_filename=model_save_name)
                 
             # Set postfix in tqdm bar for live update
@@ -1907,8 +1937,8 @@ class NN_Trainer():
             # Update tqdm progress bar with accs
             if self.tqdm_write:
                 tqdm.write(f"At {self.time_list[epoch]}  Epoch {self.epoch}/{self.num_epochs} - "
-                        f"Train Loss: {epoch_train_loss:.4f}| Val Loss: {epoch_val_loss:.4f}| Test Loss: {epoch_test_loss:.4f}| "
-                        f"Train Acc: {train_acc:.2f}| Val Acc: {val_acc:.2f}| Test Acc: {test_acc:.2f}")
+                        f"Train Loss: {epoch_train_loss:.4f} | Val Loss: {epoch_val_loss:.4f} | Test Loss: {epoch_test_loss:.4f}| "
+                        f"Train Acc: {train_acc:.2f} | Val Acc: {val_acc:.2f} | Test Acc: {test_acc:.2f}")
                 
             if self.scheduler:
                 if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):

@@ -302,8 +302,9 @@ def datetime_now(path=True):
     
     ist = pytz.timezone('Asia/Kolkata')
     dt = datetime.now(ist).strftime('%Y%m%d_%H_%M_%S' if path else '%Y/%m/%d [%H:%M:%S]')
+    date, time = datetime.now(ist).strftime('Date_%Y_%m_%d'), datetime.now(ist).strftime('Time_%H_%M_%S')
     
-    return dt
+    return dt, date, time
 
 def round_up(num: float = 1.987,
              digit: int = 2
@@ -911,7 +912,6 @@ def plot_2d(matrices=None,
         X (np.ndarray): X-coordinates for annotations (if different from matrices).
         Y (np.ndarray): Y-coordinates for annotations (if different from matrices).
     """
-    import matplotlib.pyplot as plt
 
     if matrices is None:
         raise ValueError("The 'matrices' argument must be provided and non-empty.")

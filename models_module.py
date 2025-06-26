@@ -1826,6 +1826,8 @@ class ChemBERTaRegressor(nn.Module):
             None
         """
         super().__init__()
+        self.model_name = model_name
+        self.dropout = dropout
         self.config = AutoConfig.from_pretrained(model_name)
         self.chemberta = AutoModel.from_pretrained(model_name, config=self.config)
 
@@ -1833,6 +1835,16 @@ class ChemBERTaRegressor(nn.Module):
         list_dims = [hidden_size, ] + list_dims
 
         self.regressor = self.make_mlp(list_dims=list_dims, dropout=dropout)
+        
+    def __repr__(self):
+        """
+        Task:
+            String representation of the model including its name and configuration.
+
+        Output:
+            str: Model name and configuration.
+        """
+        return f"{self.__class__.__name__}(model_name={self.model_name}, list_dims={self.list_dims}, dropout={self.dropout})"
 
     def make_mlp(self, list_dims, dropout):
         """

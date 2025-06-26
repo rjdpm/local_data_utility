@@ -13,7 +13,7 @@ from ordered_set import OrderedSet
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from sklearn.svm import SVC, SVR
 from sklearn.neighbors import KDTree, NearestNeighbors
-from typing import Any, List, Dict, Tuple, Union, Set, Callable
+from typing import Any, List, Dict, Tuple, Union, Set, Callable, Optional
 
 from rdkit import Chem, DataStructs
 from rdkit.Chem import Draw, rdDepictor, AllChem, rdMolDescriptors, Descriptors, Crippen
