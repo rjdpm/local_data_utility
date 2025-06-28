@@ -458,9 +458,11 @@ class Trainer_functions:
                     standardscaler: Any = None,
                     save_model_wrt: str = 'loss', # 'loss' or 'accuracy'
                     more_description = '',
+                    save_model_per_epoch: int = 50,
                     DATETIME: str = datetime_now(path=False)[0],
                     date: str = datetime_now(path=False)[1],
                     time: str = datetime_now(path=False)[2],
+                    save_model: bool = True,
                     device: Any = torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
                     ) -> tuple[List[float], nn.Module]:
         
@@ -636,22 +638,25 @@ class Trainer_functions:
                 raise NameError('Condition name not known')
 
             if condition_flag:
-                Trainer_functions.save_network(model=model, 
-                            optimizer=optimizer,
-                            epoch=epoch,
-                            device = device,
-                            standardscaler=standardscaler,
-                            
-                            train_acc=train_acc_list[:epoch+1],
-                            test_acc=test_acc_list[:epoch+1],
-                            val_acc=val_acc_list[:epoch+1],
-                            
-                            train_loss=epoch_train_losses[:epoch+1],
-                            test_loss=epoch_test_losses[:epoch+1],
-                            val_loss=epoch_val_losses[:epoch+1],
-                            
-                            network_save_filename=best_model_savepath
-                            )
+                if save_model:
+                    # Save the best model
+                    print(f"Saving best model at epoch {epoch + 1} with validation loss: {epoch_val_loss:.4f} and accuracy: {val_acc:.4f}")
+                    Trainer_functions.save_network(model=model, 
+                                optimizer=optimizer,
+                                epoch=epoch,
+                                device = device,
+                                standardscaler=standardscaler,
+                                
+                                train_acc=train_acc_list[:epoch+1],
+                                test_acc=test_acc_list[:epoch+1],
+                                val_acc=val_acc_list[:epoch+1],
+                                
+                                train_loss=epoch_train_losses[:epoch+1],
+                                test_loss=epoch_test_losses[:epoch+1],
+                                val_loss=epoch_val_losses[:epoch+1],
+                                
+                                network_save_filename=best_model_savepath
+                                )
                 best_train_loss, best_test_loss, best_val_loss = epoch_train_loss, epoch_test_loss, epoch_val_loss
                 best_train_acc, best_test_acc, best_val_acc = train_acc, test_acc, val_acc
                 best_epoch = epoch
@@ -672,6 +677,27 @@ class Trainer_functions:
                                     'val_acc': val_acc_list[:epoch+1],
                                     })
             Trainer_functions.save_metrics_csv(data_dict=loss_dict, save_csv_filename=f"{results_savepath}/{loss_save_filename}.csv")
+            
+            if (epoch % save_model_per_epoch == 0):
+                
+                model_save_name = f"{models_savepath}/model_at_epoch_{epoch}"
+                if save_model:
+                    print(f"Saving model at epoch {epoch + 1} to: {model_save_name}")
+                    Trainer_functions.save_network(model=model, 
+                                                optimizer=optimizer,
+                                                epoch=epoch,
+                                                device = device,
+                                                standardscaler=standardscaler,
+                                                
+                                                train_acc=train_acc_list[:epoch+1],
+                                                test_acc=test_acc_list[:epoch+1],
+                                                val_acc=val_acc_list[:epoch+1],
+                                                
+                                                train_loss=epoch_train_losses[:epoch+1],
+                                                test_loss=epoch_test_losses[:epoch+1],
+                                                val_loss=epoch_val_losses[:epoch+1],
+                                                
+                                                network_save_filename=model_save_name)
             
             # Update tqdm progress bar with accs
             if tqdm_write:
@@ -971,56 +997,21 @@ class Trainer_functions:
             print('Loading pre-trained network checkpoint from: "{}"'.format(temp_network_path))
             checkpoint = torch.load(temp_network_path, map_location=device)
             #--------------------------------------------------
-            
-            if 'epoch' in checkpoint.keys():
-                epoch_best_network = checkpoint['epoch']
-            else:
-                epoch_best_network = 0
+            epoch_best_network = checkpoint.get('epoch', 'UNKNOWN')
+            train_loss = checkpoint.get('train_loss', 'NA')
+            val_loss = checkpoint.get('val_loss', 'NA')
+            test_loss = checkpoint.get('test_loss', 'NA')
+            train_acc = checkpoint.get('train_acc', 'NA')
+            val_acc = checkpoint.get('val_acc', 'NA')
+            test_acc = checkpoint.get('test_acc', 'NA')
+            network_pyfile = checkpoint.get('network_pyfile', 'NA')
+            model_class = checkpoint.get('model_class', 'NA')
+            # network.standardscaler = checkpoint.get('standardscaler', None)
+            #--------------------------------------------------
             #+++++++++++++++++++++++++++++++++++++++++++++++++++
                 
-            if 'train_loss' in checkpoint.keys():
-                train_loss = checkpoint['train_loss']
-            else:
-                train_loss = 'NA'
-                
-            if 'val_loss' in checkpoint.keys():
-                val_loss = checkpoint['val_loss']
-            else:
-                val_loss = 'NA'
-            
-            if 'test_loss' in checkpoint.keys():
-                test_loss = checkpoint['test_loss']
-            else:
-                test_loss = 'NA'
-                
-            if 'train_acc' in checkpoint.keys():
-                train_acc = checkpoint['train_acc']
-            else:
-                train_acc = 'NA'
-                
-            if 'val_acc' in checkpoint.keys():
-                val_acc = checkpoint['val_acc']
-            else:
-                val_acc = 'NA'
-            
-            if 'test_acc' in checkpoint.keys():
-                test_acc = checkpoint['test_acc']
-            else:
-                test_acc = 'NA'
-            
-            if 'network_pyfile' in checkpoint.keys():
-                network_pyfile = checkpoint['network_pyfile']
-            else:
-                network_pyfile = 'NA'
-                
-            if 'model_class' in checkpoint.keys():
-                model_class = checkpoint['model_class']
-            else:
-                model_class = 'NA'
-            #+++++++++++++++++++++++++++++++++++++++++++++++++++
-                
-            network.load_state_dict(checkpoint['state_dict'])
-            optimizer.load_state_dict(checkpoint['optimizer'])
+            network.load_state_dict(checkpoint['state_dict'])#, strict=False)
+            # optimizer.load_state_dict(checkpoint['optimizer'], strict=False)
             
             print('Loaded pre-trained network checkpoint from "{}"\nepoch: {} train loss: {} val loss: {} test loss: {} train acc: {} val acc: {} test acc: {} ' \
                 .format(temp_network_path, epoch_best_network, train_loss[-1], val_loss[-1], test_loss[-1], train_acc[-1], val_acc[-1], test_acc[-1])
@@ -1029,12 +1020,14 @@ class Trainer_functions:
         else:
             warnings.warn(f'No pre-trained network checkpoint found at "{temp_network_path}"')
         print('-'*80)
-
-# network weight inilializer
-class weights_initilizer():
-    
-    def __init__(self, network, initializer='xvr_unifrm'):
         
+
+
+class weights_initializer:
+    """
+    Apply custom weight initialization to a PyTorch network.
+    """
+    def __init__(self, network, initializer='xvr_unifrm'):
         """
         Initialize the weights of a neural network based on the chosen scheme.
 
@@ -1047,29 +1040,26 @@ class weights_initilizer():
         Raises:
             ValueError: If an unsupported initializer is provided.
         """
-        
-        if initializer=='default':
-            pass
-        elif initializer=='zeros':
+        if initializer == 'default':
+            pass  # Do nothing
+        elif initializer == 'zeros':
             network.apply(self.weights_init_zeros)
-        elif initializer=='ones':
+        elif initializer == 'ones':
             network.apply(self.weights_init_ones)
-        elif initializer=='unifrm':
+        elif initializer == 'unifrm':
             network.apply(self.weights_init_uniform)
-        elif initializer=='nrmal':
+        elif initializer == 'nrmal':
             network.apply(self.weights_init_normal)
-        elif initializer=='xvr_unifrm':
-            network.apply(self.weights_init_xavior_uniform)
-        elif initializer=='xvr_nrmal':
-            network.apply(self.weights_init_xavior_normal)
+        elif initializer == 'xvr_unifrm':
+            network.apply(self.weights_init_xavier_uniform)
+        elif initializer == 'xvr_nrmal':
+            network.apply(self.weights_init_xavier_normal)
         else:
-            raise ValueError('Define your parameters initializer: "{}"' .format(initializer))
-    #------------------------------------------------------
-    
-    # weight initializer help function
-    
+            raise ValueError(f'Unknown initializer: "{initializer}"')
+
+    # -------------------------------------- #
+
     def weights_init_zeros(self, m):
-        
         """
         Apply zero initialization to weights and biases of the specified module.
 
@@ -1079,19 +1069,11 @@ class weights_initilizer():
         Output:
             Modifies weights and biases in-place to zeros.
         """
-        
-        if((isinstance(m, nn.Linear)) or \
-           (isinstance(m, nn.Conv1d)) or (isinstance(m, nn.ConvTranspose1d)) or \
-           (isinstance(m, nn.Conv2d)) or (isinstance(m, nn.ConvTranspose2d)) or \
-           (isinstance(m, nn.Conv3d)) or (isinstance(m, nn.ConvTranspose3d)) or \
-           (isinstance(m, nn.BatchNorm1d)) or \
-           (isinstance(m, nn.BatchNorm2d)) or \
-           (isinstance(m, nn.BatchNorm3d))):
-            torch.nn.init.zeros_(m.weight)
-            torch.nn.init.zeros_(m.bias)
-            print('Weights "{}" initialized by "zeros" scheme' .format(m))
-    #------------------------------------------------------
-    
+        if hasattr(m, 'weight') and m.weight is not None and m.weight.dim() >= 2:
+            nn.init.zeros_(m.weight)
+        if hasattr(m, 'bias') and m.bias is not None:
+            nn.init.zeros_(m.bias)
+
     def weights_init_ones(self, m):
         """
         Apply one initialization to weights and zero to biases of the specified module.
@@ -1102,19 +1084,11 @@ class weights_initilizer():
         Output:
             Modifies weights to ones and biases to zeros in-place.
         """
-        
-        if((isinstance(m, nn.Linear)) or \
-           (isinstance(m, nn.Conv1d)) or (isinstance(m, nn.ConvTranspose1d)) or \
-           (isinstance(m, nn.Conv2d)) or (isinstance(m, nn.ConvTranspose2d)) or \
-           (isinstance(m, nn.Conv3d)) or (isinstance(m, nn.ConvTranspose3d)) or \
-           (isinstance(m, nn.BatchNorm1d)) or \
-           (isinstance(m, nn.BatchNorm2d)) or \
-           (isinstance(m, nn.BatchNorm3d))):
-            torch.nn.init.ones_(m.weight)
-            torch.nn.init.zeros_(m.bias)
-            print('Weights "{}" initialized by "ones" scheme' .format(m))
-    #------------------------------------------------------
-    
+        if hasattr(m, 'weight') and m.weight is not None and m.weight.dim() >= 2:
+            nn.init.ones_(m.weight)
+        if hasattr(m, 'bias') and m.bias is not None:
+            nn.init.zeros_(m.bias)
+
     def weights_init_uniform(self, m):
         """
         Apply uniform distribution-based initialization to weights and biases.
@@ -1125,18 +1099,11 @@ class weights_initilizer():
         Output:
             Modifies weights and biases in-place using a uniform distribution.
         """
-        if((isinstance(m, nn.Linear)) or \
-           (isinstance(m, nn.Conv1d)) or (isinstance(m, nn.ConvTranspose1d)) or \
-           (isinstance(m, nn.Conv2d)) or (isinstance(m, nn.ConvTranspose2d)) or \
-           (isinstance(m, nn.Conv3d)) or (isinstance(m, nn.ConvTranspose3d)) or \
-           (isinstance(m, nn.BatchNorm1d)) or \
-           (isinstance(m, nn.BatchNorm2d)) or \
-           (isinstance(m, nn.BatchNorm3d))):
-            torch.nn.init.uniform_(m.weight)
-            torch.nn.init.uniform_(m.bias)
-            print('Weights "{}" initialized by "uniform" scheme' .format(m))
-    #------------------------------------------------------
-    
+        if hasattr(m, 'weight') and m.weight is not None and m.weight.dim() >= 2:
+            nn.init.uniform_(m.weight)
+        if hasattr(m, 'bias') and m.bias is not None:
+            nn.init.uniform_(m.bias)
+
     def weights_init_normal(self, m):
         """
         Apply normal distribution-based initialization to weights and biases.
@@ -1147,19 +1114,12 @@ class weights_initilizer():
         Output:
             Modifies weights and biases in-place using a normal distribution.
         """
-        if((isinstance(m, nn.Linear)) or \
-           (isinstance(m, nn.Conv1d)) or (isinstance(m, nn.ConvTranspose1d)) or \
-           (isinstance(m, nn.Conv2d)) or (isinstance(m, nn.ConvTranspose2d)) or \
-           (isinstance(m, nn.Conv3d)) or (isinstance(m, nn.ConvTranspose3d)) or \
-           (isinstance(m, nn.BatchNorm1d)) or \
-           (isinstance(m, nn.BatchNorm2d)) or \
-           (isinstance(m, nn.BatchNorm3d))):
-            torch.nn.init.normal_(m.weight)
-            torch.nn.init.normal_(m.bias)
-            print('Weights "{}" initialized by "normal_dist" scheme' .format(m))
-    #------------------------------------------------------
-    
-    def weights_init_xavior_uniform(self, m):
+        if hasattr(m, 'weight') and m.weight is not None and m.weight.dim() >= 2:
+            nn.init.normal_(m.weight)
+        if hasattr(m, 'bias') and m.bias is not None:
+            nn.init.normal_(m.bias)
+
+    def weights_init_xavier_uniform(self, m):
         """
         Apply Xavier uniform initialization to weights and zero to biases.
 
@@ -1171,26 +1131,21 @@ class weights_initilizer():
         Output:
             Modifies weights and biases in-place using Xavier or orthogonal schemes.
         """
-        if((isinstance(m, nn.Linear)) or \
-           (isinstance(m, nn.Conv1d)) or (isinstance(m, nn.ConvTranspose1d)) or \
-           (isinstance(m, nn.Conv2d)) or (isinstance(m, nn.ConvTranspose2d)) or \
-           (isinstance(m, nn.Conv3d)) or (isinstance(m, nn.ConvTranspose3d)) or \
-           (isinstance(m, nn.BatchNorm1d)) or \
-           (isinstance(m, nn.BatchNorm2d)) or \
-           (isinstance(m, nn.BatchNorm3d))):
-            torch.nn.init.xavier_uniform_(m.weight)
-            torch.nn.init.zeros_(m.bias)
-            print('Weights "{}" initialized by "xavior_uniform" scheme' .format(m))
-        elif isinstance(m, nn.GRU):
+        if isinstance(m, nn.GRU):
             for param in m.parameters():
-                if len(param.shape) >= 2:
-                    torch.nn.init.orthogonal_(param.data)
+                if param.dim() >= 2:
+                    nn.init.orthogonal_(param.data)
                 else:
-                    torch.nn.init.normal_(param.data)
-            print('Weights "{}" initialized by "orthogonal" scheme' .format(m))
-    #------------------------------------------------------
-    
-    def weights_init_xavior_normal(self, m):
+                    nn.init.normal_(param.data)
+        elif isinstance(m, (nn.Linear, nn.Conv1d, nn.Conv2d, nn.Conv3d)) and m.weight.dim() >= 2:
+            nn.init.xavier_uniform_(m.weight)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+        elif isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d, nn.LayerNorm)):
+            nn.init.ones_(m.weight)
+            nn.init.zeros_(m.bias)
+
+    def weights_init_xavier_normal(self, m):
         """
         Apply Xavier normal initialization to weights and zero to biases.
 
@@ -1202,23 +1157,20 @@ class weights_initilizer():
         Output:
             Modifies weights and biases in-place using Xavier or orthogonal schemes.
         """
-        if((isinstance(m, nn.Linear)) or \
-           (isinstance(m, nn.Conv1d)) or (isinstance(m, nn.ConvTranspose1d)) or \
-           (isinstance(m, nn.Conv2d)) or (isinstance(m, nn.ConvTranspose2d)) or \
-           (isinstance(m, nn.Conv3d)) or (isinstance(m, nn.ConvTranspose3d)) or \
-           (isinstance(m, nn.BatchNorm1d)) or \
-           (isinstance(m, nn.BatchNorm2d)) or \
-           (isinstance(m, nn.BatchNorm3d))):
-            torch.nn.init.xavier_normal_(m.weight)
-            torch.nn.init.zeros_(m.bias)
-            print('Weights "{}" initialized by "xavior_normal" scheme' .format(m))
-        elif isinstance(m, nn.GRU):
+        if isinstance(m, nn.GRU):
             for param in m.parameters():
-                if len(param.shape) >= 2:
-                    torch.nn.init.orthogonal_(param.data)
+                if param.dim() >= 2:
+                    nn.init.orthogonal_(param.data)
                 else:
-                    torch.nn.init.normal_(param.data)
-            print('Weights "{}" initialized by "orthogonal" scheme' .format(m))
+                    nn.init.normal_(param.data)
+        elif isinstance(m, (nn.Linear, nn.Conv1d, nn.Conv2d, nn.Conv3d)) and m.weight.dim() >= 2:
+            nn.init.xavier_normal_(m.weight)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+        elif isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d, nn.LayerNorm)):
+            nn.init.ones_(m.weight)
+            nn.init.zeros_(m.bias)
+
 
 
 class EarlyStopping:

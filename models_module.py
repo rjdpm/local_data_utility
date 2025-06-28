@@ -44,7 +44,15 @@ __all__ = [
     'MRGCN',
     'ChemBERTaRegressorroberta',
     'ChemBERTaRegressor',
-    'SimpleAttention',
+    'ChemBERTaRegressorwithMultiheadAttention',
+    'AdditiveAttention',
+    'DotProductAttention',
+    'UnifiedAttention',
+    'MultiHeadAttention',
+    'GeneralizedAdditiveAttention',
+    'GeneralizedDotProductAttention',
+    'GeneralizedUnifiedAttention',
+    'GeneralizedMultiHeadAttention',
 ]
 
 source_file = os.path.abspath(__file__)
@@ -79,45 +87,62 @@ def activation_func(name='relu', alpha=1.0, negative_slope=1e-2):
         return nn.LeakyReLU(negative_slope, inplace=True)
     elif name == 'celu':
         return nn.CELU(alpha, inplace=True)
+    elif name == 'gelu':
+        return nn.GELU()
+    elif name is None:
+        return nn.Identity()
     else:
         raise ValueError(f'Unsupported activation function: "{name}"')
-
+    
 
 def make_mlp(list_dims, dropout=0.0, act_func='relu', norm_type='layer', alpha=1.0, negative_slope=1e-2):
     """
-    Construct a multi-layer perceptron with normalization, activation, and dropout.
+    Construct a multi-layer perceptron with optional per-layer activation, normalization, and dropout.
 
     Args:
         list_dims (list of int): List of layer dimensions.
         dropout (float): Dropout rate.
-        act_func (str): Activation function name.
+        act_func (Union[str, list of str]): Single activation function name or list of names per layer.
         norm_type (str): Normalization type: 'batch', 'layer', or None.
         alpha (float): Alpha parameter for ELU/CELU.
         negative_slope (float): Negative slope for LeakyReLU.
 
     Returns:
-        nn.Sequential: MLP model.
+        nn.Sequential: Assembled MLP model.
     """
-    layers = []
-    act_layer = activation_func(act_func, alpha=alpha, negative_slope=negative_slope)
-    
-    for i in range(len(list_dims) - 1):
+    layers = nn.ModuleList([])
+
+    # Standardize act_func to a list of activation layers
+    num_layers = len(list_dims) - 1
+    if isinstance(act_func, (str, None)):
+        act_funcs = [activation_func(act_func, alpha=alpha, negative_slope=negative_slope)] * (num_layers - 1)
+    elif isinstance(act_func, list):
+        if len(act_func) != num_layers - 1:
+            raise ValueError(f"Length of act_func list must match number of hidden layers {(len(list_dims) - 2)}.")
+        act_funcs = [activation_func(name, alpha=alpha, negative_slope=negative_slope) for name in act_func]
+    else:
+        raise TypeError("act_func must be a string or a list of strings.")
+
+    for i in range(num_layers):
         in_dim = list_dims[i]
         out_dim = list_dims[i + 1]
         layers.append(nn.Linear(in_dim, out_dim))
-        
-        if i < len(list_dims) - 2:  # Skip last layer for normalization and activation
+
+        if i < num_layers - 1:
+            # Normalization
             if norm_type == 'batch':
                 layers.append(nn.BatchNorm1d(out_dim))
             elif norm_type == 'layer':
                 layers.append(nn.LayerNorm(out_dim))
             elif norm_type is not None:
                 raise ValueError(f"Unsupported normalization type: {norm_type}")
-
-            layers.append(act_layer)
+            
+            # Activation and Dropout
+            layers.append(act_funcs[i])
             layers.append(nn.Dropout(dropout))
 
     return nn.Sequential(*layers)
+
 
     
 def normalize_adjacency(
@@ -1812,7 +1837,14 @@ class ChemBERTaRegressor(nn.Module):
     Task:
         ChemBERTa-based regressor for molecular property prediction using AutoModel.
     """
-    def __init__(self, model_name: str, list_dims: list[int], dropout: float = 0.2):
+    def __init__(self,
+                 model_name: str,
+                 list_dims: list[int],
+                 dropout: float = 0.2,
+                 act_func: str = 'relu',
+                 norm_type: str = 'layer',
+                 max_position_embeddings: int = 0
+                 ):
         """
         Task:
             Initialize model with a pretrained transformer and a regression MLP.
@@ -1828,13 +1860,19 @@ class ChemBERTaRegressor(nn.Module):
         super().__init__()
         self.model_name = model_name
         self.dropout = dropout
+        self.act_func = act_func
+        self.max_position_embeddings = max_position_embeddings
+        self.norm_type = norm_type
         self.config = AutoConfig.from_pretrained(model_name)
         self.chemberta = AutoModel.from_pretrained(model_name, config=self.config)
 
         hidden_size = self.config.hidden_size
-        list_dims = [hidden_size, ] + list_dims
+        self.list_dims = [hidden_size, ] + list_dims
+        if self.max_position_embeddings>0:
+            self.position_embeddings = nn.Embedding(max_position_embeddings, hidden_size)
 
-        self.regressor = self.make_mlp(list_dims=list_dims, dropout=dropout)
+        self.regressor = make_mlp(list_dims=self.list_dims, dropout=self.dropout, act_func=self.act_func, norm_type=self.norm_type)
+        
         
     def __repr__(self):
         """
@@ -1844,30 +1882,25 @@ class ChemBERTaRegressor(nn.Module):
         Output:
             str: Model name and configuration.
         """
-        return f"{self.__class__.__name__}(model_name={self.model_name}, list_dims={self.list_dims}, dropout={self.dropout})"
+        out =  (f"{self.__class__.__name__}(model_name={self.model_name}, "
+                f"list_dims={self.list_dims}, dropout={self.dropout}, "
+                f"act_func={self.act_func}, norm_type={self.norm_type})")
+        
+        return out
+    
+    def token_embeddings(self, input_ids, attention_mask):
+        outputs = self.chemberta(input_ids=input_ids, attention_mask=attention_mask)
+        token_embed = outputs.last_hidden_state  # [B, T, H]
 
-    def make_mlp(self, list_dims, dropout):
-        """
-        Task:
-            Build a feedforward regressor with optional dropout and activation.
+        if self.max_position_embeddings>0:
+            # Add positional embeddings
+            B, T = input_ids.size()
+            position_ids = torch.arange(T, dtype=torch.long, device=input_ids.device)  # [T]
+            position_ids = position_ids.unsqueeze(0).expand(B, T)  # [B, T]
+            pos_embed = self.position_embeddings(position_ids)  # [B, T, H]
+            token_embed = token_embed + pos_embed  # [B, T, H]
 
-        Input:
-            list_dims (list[int]): List of layer dimensions.
-            dropout (float): Dropout rate.
-
-        Output:
-            nn.Sequential: Multi-layer perceptron for regression.
-        """
-        layers = nn.ModuleList([])
-        for i in range(len(list_dims) - 1):
-            layers.append(nn.Linear(list_dims[i], list_dims[i + 1]))
-            if i < len(list_dims) - 2:
-                layers.extend([
-                    nn.LayerNorm(list_dims[i + 1]),
-                    nn.ReLU(),
-                    nn.Dropout(dropout)
-                ])
-        return nn.Sequential(*layers)
+        return token_embed
 
     def embeddings(self, input_ids, attention_mask):
         """
@@ -1881,11 +1914,11 @@ class ChemBERTaRegressor(nn.Module):
         Output:
             Tensor: Mean pooled embedding of shape [B, H].
         """
-        outputs = self.chemberta(input_ids=input_ids, attention_mask=attention_mask)
-        last_hidden = outputs.last_hidden_state  # [B, T, H]
+        last_hidden = self.token_embeddings(input_ids=input_ids, attention_mask=attention_mask)
         masked_embed = (last_hidden * attention_mask.unsqueeze(-1)).sum(1)
         denom = attention_mask.sum(1, keepdim=True).clamp(min=1e-6)
         return masked_embed / denom  # mean pooling
+    
 
     def forward(self, input_ids, attention_mask):
         """
@@ -1903,8 +1936,96 @@ class ChemBERTaRegressor(nn.Module):
         x = self.regressor(x)
         return x
     
+class ChemBERTaRegressorwithMultiheadAttention(ChemBERTaRegressor):
+    """
+    Task:
+        ChemBERTa-based regressor with multi-head attention for molecular property prediction.
+    """
+    def __init__(self,
+                 model_name: str,
+                 list_dims: list[int],
+                 dropout: float = 0.2,
+                 act_func: str = 'relu',
+                 norm_type: str = 'layer',
+                 num_heads: int = 4,
+                 mode: str = 'dot',
+                 max_position_embeddings: int = 0
+                 ):
+        """
+        Task:
+            Initialize model with a pretrained transformer and a regression MLP with multi-head attention.
+
+        Input:
+            model_name (str): Huggingface model identifier (e.g., 'seyonec/ChemBERTa').
+            list_dims (list[int]): Dimensions for the MLP head.
+            dropout (float): Dropout probability.
+            act_func (str): Activation function type.
+            norm_type (str): Normalization type.
+            num_heads (int): Number of attention heads.
+
+        Output:
+            None
+        """
+        self.num_heads = num_heads
+        self.mode = mode
+        self.max_position_embeddings = max_position_embeddings
+        
+        if mode not in ['dot', 'additive']:
+            raise ValueError("mode must be either 'dot' or 'additive'")
+        super().__init__(model_name=model_name,
+                        list_dims=list_dims,
+                        dropout=dropout,
+                        act_func=act_func,
+                        norm_type=norm_type,
+                        max_position_embeddings=max_position_embeddings
+                        )
+        # self.multihead_attn = nn.MultiheadAttention(embed_dim=self.config.hidden_size, num_heads=num_heads, dropout=dropout)
+        
+        if num_heads == 1:
+            self.multihead_attn = UnifiedAttention(input_dim=self.config.hidden_size, attn_dim=self.config.hidden_size, mode=self.mode)
+        elif num_heads > 1:
+            self.multihead_attn = MultiHeadAttention(embed_dim=self.config.hidden_size, num_heads=num_heads, mode=self.mode)
+        else:
+            print('-'*80)
+            print("No multi-head attention applied. Using single attention layer instead.")
+            print('-'*80)
+        self.attn_layer = nn.Linear(self.config.hidden_size, 1)
+        
+    def embeddings(self, input_ids, attention_mask):
+        
+        embed = self.token_embeddings(input_ids=input_ids, attention_mask=attention_mask)# [B, T, H]
+        # print(f'embed.shape = {embed.shape}')
+        if isinstance(self.num_heads, int) and self.num_heads > 0:
+            embed, attn_weights = self.multihead_attn(x=embed, mask=attention_mask)
+        # print(f'embed.shape after attention = {embed.shape}')
+        attn_weights = torch.tanh(self.attn_layer(embed))  # [B, T, 1]
+        # print(f'attn_weights.shape = {attn_weights.shape}')
+        attn_weights = attn_weights.masked_fill(attention_mask.unsqueeze(-1) == 0, float('-inf'))
+        # print(f'attn_weights.shape after masking = {attn_weights.shape}')
+        attn_weights = F.softmax(attn_weights, dim=1)
+        # print(f'attn_weights.shape after softmax = {attn_weights.shape}')
+        pooled = torch.sum(attn_weights * embed, dim=1)  # [B, H]
+        # print(f'pooled.shape = {pooled.shape}')
+        
+        return pooled
     
-class SimpleAttention(nn.Module):
+    def forward(self, input_ids, attention_mask):
+        """
+        Task:
+            Perform forward pass for regression prediction with attention.
+
+        Input:
+            input_ids (Tensor): Tokenized inputs.
+            attention_mask (Tensor): Valid attention positions.
+
+        Output:
+            Tensor: Regression prediction.
+        """
+        x = self.embeddings(input_ids=input_ids, attention_mask=attention_mask)
+        x = self.regressor(x)
+        return x
+    
+class AdditiveAttention(nn.Module):
     """
     Task:
         Implements a simple additive attention mechanism for sequence summarization.
@@ -1921,7 +2042,7 @@ class SimpleAttention(nn.Module):
         Output:
             None
         """
-        super(SimpleAttention, self).__init__()
+        super(AdditiveAttention, self).__init__()
         self.query = nn.Linear(input_dim, hidden_dim)
         self.key = nn.Linear(input_dim, hidden_dim)
         self.value = nn.Linear(input_dim, hidden_dim)
@@ -1946,6 +2067,337 @@ class SimpleAttention(nn.Module):
 
         scores = torch.tanh(Q + K)                # (B, S, H)
         attn_weights = F.softmax(self.attn_score(scores), dim=1)  # (B, S, 1)
-
         context = torch.sum(attn_weights * V, dim=1)  # (B, H)
+        
         return context, attn_weights
+    
+    
+class DotProductAttention(nn.Module):
+    """
+    Implements single-head scaled dot-product attention.
+
+    Inputs:
+        embed_dim (int): Input embedding dimension.
+        head_dim (int): Dimension for query, key, and value projections.
+    """
+    def __init__(self, embed_dim, head_dim):
+        super(DotProductAttention, self).__init__()
+        self.q_proj = nn.Linear(embed_dim, head_dim)
+        self.k_proj = nn.Linear(embed_dim, head_dim)
+        self.v_proj = nn.Linear(embed_dim, head_dim)
+        self.scale = head_dim ** 0.5
+
+    def forward(self, x, mask=None):
+        """
+        Apply scaled dot-product attention.
+
+        Input:
+            x (Tensor): [B, T, D] input embeddings
+            mask (Tensor, optional): [B, T] attention mask
+
+        Output:
+            out (Tensor): [B, T, head_dim]
+            weights (Tensor): [B, T, T] attention weights
+        """
+        Q = self.q_proj(x)  # [B, T, head_dim]
+        K = self.k_proj(x)
+        V = self.v_proj(x)
+
+        attn_scores = torch.matmul(Q, K.transpose(-2, -1)) / self.scale  # [B, T, T]
+
+        if mask is not None:
+            mask = mask.unsqueeze(1)  # [B, 1, T]
+            attn_scores = attn_scores.masked_fill(mask == 0, float("-inf"))
+
+        attn_weights = F.softmax(attn_scores, dim=-1)  # [B, T, T]
+        out = torch.matmul(attn_weights, V)  # [B, T, head_dim]
+
+        return out, attn_weights
+
+class UnifiedAttention(nn.Module):
+    """
+    Unified implementation of Additive and Scaled Dot-Product Attention,
+    using AdditiveAttention and DotProductAttention classes internally.
+    """
+    def __init__(self, input_dim: int, attn_dim: int, mode: str = 'dot'):
+        super(UnifiedAttention, self).__init__()
+        assert mode in ['dot', 'additive'], "mode must be either 'dot' or 'additive'"
+        self.mode = mode
+
+        if self.mode == 'additive':
+            # Use AdditiveAttention which takes input_dim, hidden_dim
+            self.attn = AdditiveAttention(input_dim, attn_dim)
+        else:
+            # Use DotProductAttention which takes embed_dim, head_dim
+            self.attn = DotProductAttention(input_dim, attn_dim)
+
+    def forward(self, x: torch.Tensor, mask: torch.Tensor = None):
+        """
+        Args:
+            x (Tensor): Input sequence tensor of shape [B, T, D].
+            mask (Tensor, optional): Binary mask of shape [B, T], 1 for valid, 0 for pad.
+
+        Returns:
+            out (Tensor): Output tensor.
+            attn_weights (Tensor): Attention weights.
+        """
+        if self.mode == 'additive':
+            # AdditiveAttention returns context: [B, H], attn_weights: [B, S, 1]
+            context, attn_weights = self.attn(x)
+            # context shape [B, H], expand to [B, T, H] to be consistent
+            out = context.unsqueeze(1).expand(-1, x.size(1), -1)
+        else:
+            # DotProductAttention expects mask for masking, which is [B, T]
+            out, attn_weights = self.attn(x, mask)
+        
+        return out, attn_weights
+
+    
+class MultiHeadAttention(nn.Module):
+    """
+    Implements multi-head attention using multiple DotProductAttention blocks.
+
+    Inputs:
+        embed_dim (int): Input embedding dimension.
+        num_heads (int): Number of attention heads.
+
+    Output:
+        out (Tensor): [B, T, embed_dim]
+        attn_weights (Tensor): [B, num_heads, T, T]
+    """
+    def __init__(self, embed_dim, num_heads, head_dim: int = None, mode: str = 'dot'):
+        super(MultiHeadAttention, self).__init__()
+        # assert embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads."
+
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.mode = mode
+        self.head_dim = head_dim if head_dim is not None else embed_dim // num_heads
+        self.concat_dim = self.head_dim*num_heads
+
+        # Create a list of attention heads
+        self.heads = nn.ModuleList([UnifiedAttention(input_dim=embed_dim, attn_dim=self.head_dim, mode=self.mode) for _ in range(num_heads)])
+
+        # Final linear projection to merge all heads
+        self.out_proj = nn.Linear(self.concat_dim, embed_dim)
+
+    def forward(self, x, mask=None):
+        """
+        Args:
+            x (Tensor): [B, T, D]
+                - B: Batch size (number of samples)
+                - T: Sequence length (number of tokens)
+                - D: Embedding dimension (hidden size)
+            
+            mask (Tensor, optional): [B, T]
+                - Attention mask. 1 for valid tokens, 0 for padding.
+                - Used to prevent attending to padded positions.
+
+        Returns:
+            out (Tensor): [B, T, D]
+                - Output after applying multi-head attention.
+                - Same shape as input, but now each token has contextualized information.
+ 
+            attn_weights (Tensor): [B, H, T, T]
+                - Attention weights for each head.
+                - H: Number of attention heads.
+                - Each [T, T] matrix shows how each token attends to every other token.
+        """
+        head_outputs = []
+        head_weights = []
+
+        for head in self.heads:
+            h_out, h_weights = head(x, mask)
+            head_outputs.append(h_out)         # [B, T, head_dim]
+            head_weights.append(h_weights)     # [B, T, T]
+
+        # Concatenate head outputs along last dim
+        concat = torch.cat(head_outputs, dim=-1)  # [B, T, embed_dim]
+        out = self.out_proj(concat)               # [B, T, embed_dim]
+
+        # Stack attention weights
+        attn_weights = torch.stack(head_weights, dim=1)  # [B, num_heads, T, T]
+
+        return out, attn_weights 
+
+    
+
+class GeneralizedAdditiveAttention(nn.Module):
+    """
+    Generalizedized additive attention mechanism using customizable MLP for scoring.
+
+    Capable of summarizing sequences by computing attention over input features
+    with optional Q/K/V projections and MLP-based attention scoring.
+    """
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int,
+        mlp_hidden: list = [128],
+        proj_qkv: bool = True,
+        reduce: str = 'sum',
+        dropout: float = 0.0,
+        norm_type: str = 'layer',
+        act_func: str = 'tanh',
+        proj_dims: list = [128],
+        proj_dropout: float = 0.0,
+        proj_act: str = None,
+        proj_norm: str = 'layer'
+    ):
+        """
+        Args:
+            input_dim (int): Dimensionality of input features.
+            hidden_dim (int): Dimension for Q, K, V after projection.
+            mlp_hidden (list of int): Hidden layer sizes for attention scoring MLP.
+            proj_qkv (bool): Whether to project Q, K, V through MLPs.
+            reduce (str): Reduction strategy over sequence: 'sum', 'mean', or 'none'.
+            dropout (float): Dropout used inside the attention MLP.
+            norm_type (str): Normalization used inside attention MLP.
+            act_func (str): Activation function used in attention MLP.
+            proj_dims (list of int): Layer dimensions for QKV projection ending in `hidden_dim`.
+            proj_dropout (float): Dropout in QKV projection MLPs.
+            proj_act (str): Activation function in QKV projection MLPs.
+            proj_norm (str): Normalization used in QKV projection MLPs.
+        """
+        super().__init__()
+
+        self.reduce = reduce.lower()
+        assert self.reduce in ['sum', 'mean', 'none'], "reduce must be 'sum', 'mean', or 'none'"
+
+        if proj_qkv:
+            qkv_proj_dims = proj_dims + [hidden_dim]
+            self.query = make_mlp([input_dim] + qkv_proj_dims, dropout=proj_dropout, act_func=proj_act, norm_type=proj_norm)
+            self.key   = make_mlp([input_dim] + qkv_proj_dims, dropout=proj_dropout, act_func=proj_act, norm_type=proj_norm)
+            self.value = make_mlp([input_dim] + qkv_proj_dims, dropout=proj_dropout, act_func=proj_act, norm_type=proj_norm)
+        else:
+            self.query = nn.Identity()
+            self.key   = nn.Identity()
+            self.value = nn.Identity()
+
+        # Attention scoring MLP: combines Q+K to scalar attention logit
+        self.attn_score_mlp = make_mlp([hidden_dim] + mlp_hidden + [1], dropout=dropout, act_func=act_func, norm_type=norm_type)
+
+    def forward(self, x: torch.Tensor, mask: torch.Tensor = None):
+        """
+        Args:
+            x (Tensor): Input tensor of shape [B, S, D].
+            mask (Tensor, optional): Binary mask of shape [B, S], with 1 for valid tokens.
+
+        Returns:
+            context (Tensor): Context vector [B, H] or [B, S, H] if reduce='none'.
+            attn_weights (Tensor): Attention weights [B, S, 1].
+        """
+        B, S, D = x.shape
+
+        Q = self.query(x)  # [B, S, H]
+        K = self.key(x)    # [B, S, H]
+        V = self.value(x)  # [B, S, H]
+
+        score_input = torch.tanh(Q + K)  # [B, S, H]
+        attn_logits = self.attn_score_mlp(score_input)  # [B, S, 1]
+
+        if mask is not None:
+            attn_logits = attn_logits.masked_fill(mask.unsqueeze(-1) == 0, float('-inf'))
+
+        attn_weights = F.softmax(attn_logits, dim=1)  # [B, S, 1]
+        weighted = attn_weights * V  # [B, S, H]
+
+        if self.reduce == 'sum':
+            context = torch.sum(weighted, dim=1)  # [B, H]
+        elif self.reduce == 'mean':
+            denom = mask.sum(dim=1, keepdim=True).clamp(min=1).unsqueeze(-1) if mask is not None else S
+            context = torch.sum(weighted, dim=1) / denom  # [B, H]
+        else:  # 'none'
+            context = weighted  # [B, S, H]
+
+        return context, attn_weights
+    
+class GeneralizedDotProductAttention(nn.Module):
+    def __init__(self, input_dim, hidden_dim, proj_dims=[128], proj_qkv=True, dropout=0.0, reduce='none'):
+        super().__init__()
+        self.reduce = reduce
+        self.scale = hidden_dim ** 0.5
+
+        if proj_qkv:
+            proj_layers = proj_dims + [hidden_dim]
+            self.q_proj = make_mlp([input_dim] + proj_layers, dropout=dropout)
+            self.k_proj = make_mlp([input_dim] + proj_layers, dropout=dropout)
+            self.v_proj = make_mlp([input_dim] + proj_layers, dropout=dropout)
+        else:
+            self.q_proj = nn.Identity()
+            self.k_proj = nn.Identity()
+            self.v_proj = nn.Identity()
+
+    def forward(self, x, mask=None):
+        Q = self.q_proj(x)
+        K = self.k_proj(x)
+        V = self.v_proj(x)
+
+        attn_scores = torch.matmul(Q, K.transpose(-2, -1)) / self.scale
+
+        if mask is not None:
+            mask = mask.unsqueeze(1)
+            attn_scores = attn_scores.masked_fill(mask == 0, float("-inf"))
+
+        attn_weights = F.softmax(attn_scores, dim=-1)
+        out = torch.matmul(attn_weights, V)
+
+        if self.reduce == 'sum':
+            out = out.sum(dim=1)
+        elif self.reduce == 'mean':
+            denom = mask.sum(dim=2, keepdim=True).clamp(min=1) if mask is not None else x.size(1)
+            out = out.sum(dim=1) / denom
+        # else: reduce='none', keep as is
+
+        return out, attn_weights
+
+
+class GeneralizedUnifiedAttention(nn.Module):
+    def __init__(self, input_dim, hidden_dim, mode='dot', **kwargs):
+        super().__init__()
+        assert mode in ['dot', 'additive'], "mode must be 'dot' or 'additive'"
+        self.mode = mode
+        if mode == 'dot':
+            self.attn = GeneralizedDotProductAttention(input_dim, hidden_dim, **kwargs)
+        else:
+            self.attn = GeneralizedAdditiveAttention(input_dim, hidden_dim, **kwargs)
+
+    def forward(self, x, mask=None):
+        out, attn_weights = self.attn(x, mask)
+        if isinstance(out, torch.Tensor) and out.dim() == 2:  # [B, H]
+            out = out.unsqueeze(1).expand(-1, x.size(1), -1)
+        return out, attn_weights
+
+    
+
+class GeneralizedMultiHeadAttention(nn.Module):
+    def __init__(self, embed_dim, num_heads, mode='dot', **kwargs):
+        super().__init__()
+        assert embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+
+        self.heads = nn.ModuleList([GeneralizedUnifiedAttention(input_dim=embed_dim,
+                                                            hidden_dim=self.head_dim,
+                                                            mode=mode,
+                                                            **kwargs
+                                                            )for _ in range(num_heads)
+                                    ])
+
+        self.out_proj = nn.Linear(embed_dim, embed_dim)
+
+    def forward(self, x, mask=None):
+        head_outputs = []
+        head_weights = []
+
+        for head in self.heads:
+            h_out, h_weights = head(x, mask)
+            head_outputs.append(h_out)
+            head_weights.append(h_weights)
+
+        concat = torch.cat(head_outputs, dim=-1)
+        out = self.out_proj(concat)
+
+        attn_weights = torch.stack(head_weights, dim=1)
+        return out, attn_weights

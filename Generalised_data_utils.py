@@ -21,7 +21,7 @@ import seaborn as sns
 from tqdm import tqdm
 from pympler import asizeof
 import matplotlib
-matplotlib.use('TkAgg')
+# matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from datetime import datetime
