@@ -2125,7 +2125,7 @@ class UnifiedAttention(nn.Module):
         self.mode = mode
 
         if self.mode == 'additive':
-            # Use AdditiveAttention which takes input_dim, hidden_dim
+            ## Use AdditiveAttention which takes input_dim, hidden_dim
             self.attn = AdditiveAttention(input_dim, attn_dim)
         else:
             # Use DotProductAttention which takes embed_dim, head_dim
