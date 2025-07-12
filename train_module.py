@@ -30,10 +30,10 @@ from torchvision.datasets import ImageFolder
 from torchvision.datasets.utils import download_url
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from Generalised_data_utils import regression_test_metrics, datetime_now, create_folder, subset_loader
+from Generalised_data_utils import regression_test_metrics, datetime_now, create_folder, subset_loader, get_param_names
 
 __all__ = ['NN_Trainer',
-           'weights_initilizer',
+           'weights_initializer',
            'EarlyStopping',
            'Trainer_functions'
            ]
@@ -390,12 +390,14 @@ class Trainer_functions:
         model.train()# switch to train model
         model = model.to(device)
         epoch_train_loss = 0
+        model_params = get_param_names(model.forward)
         # with torch.autograd.set_detect_anomaly(True):
         for i, batch in tqdm(enumerate(train_loader), total=len(train_loader)):
             # print(f'Train Batch: {i}\n')
-            batch = {k: v.to(device) for k, v in batch.items()}
+            # batch = {k: v.to(device) for k, v in batch.items() if k in model_params}
+            targets = batch.pop(targets_col).to(device)
+            batch = {k: batch[k].to(device) for k in model_params}
             optimizer.zero_grad()
-            targets = batch.pop(targets_col)
             outputs = model(**batch)
                 
             loss = criterion(input=outputs.reshape(targets.shape).type(torch.float32), target=targets.type(torch.float32)).type(torch.float32)
@@ -559,6 +561,10 @@ class Trainer_functions:
                     f"{'    Val-Test Subset':35}: {int(num_val * subset_ratio)} samples\n"
                     f"{'    Test-Test Subset':35}: {int(num_test * subset_ratio)} samples\n"
                     f"{'-'*60}\n"
+                    f"{'## Representation ##'}\n"
+                    f"{'-'*60}\n"
+                    f"{repr(model)}\n"
+                    f"{'-'*60}\n"
 
                 )
         out = out + more_description +'\n' + '='*80 
@@ -701,7 +707,7 @@ class Trainer_functions:
             
             # Update tqdm progress bar with accs
             if tqdm_write:
-                tqdm.write(f"At {time_list[epoch]}  Epoch {epoch+1}/{num_epochs} - "
+                tqdm.write(f"At {time_list[epoch]} |Epoch {epoch+1}/{num_epochs} - "
                         f"Train Loss: {epoch_train_loss:.4f} | Val Loss: {epoch_val_loss:.4f} | Test Loss: {epoch_test_loss:.4f} | "
                         f"Train Acc: {train_acc:.2f} | Val Acc: {val_acc:.2f} | Test Acc: {test_acc:.2f}")
             
@@ -923,6 +929,7 @@ class Trainer_functions:
                     'device': str(device),
                     'hostname': platform.node(),
                     'epoch': epoch+1,
+                    'datetime':datetime_now(),
                     'utils_pyfile': utils_pyfile,
                     'network_pyfile': getattr(model, 'model_script', None),
                     'learning_rate' : learning_rate,
@@ -994,6 +1001,7 @@ class Trainer_functions:
         """
         
         if os.path.isfile(temp_network_path):
+            print('-'*80)
             print('Loading pre-trained network checkpoint from: "{}"'.format(temp_network_path))
             checkpoint = torch.load(temp_network_path, map_location=device)
             #--------------------------------------------------
@@ -1006,21 +1014,24 @@ class Trainer_functions:
             test_acc = checkpoint.get('test_acc', 'NA')
             network_pyfile = checkpoint.get('network_pyfile', 'NA')
             model_class = checkpoint.get('model_class', 'NA')
-            # network.standardscaler = checkpoint.get('standardscaler', None)
+            standardscaler = checkpoint.get('standardscaler', None)
             #--------------------------------------------------
             #+++++++++++++++++++++++++++++++++++++++++++++++++++
                 
-            network.load_state_dict(checkpoint['state_dict'])#, strict=False)
+            network.load_state_dict(checkpoint['state_dict'], strict=True)
             # optimizer.load_state_dict(checkpoint['optimizer'], strict=False)
             
             print('Loaded pre-trained network checkpoint from "{}"\nepoch: {} train loss: {} val loss: {} test loss: {} train acc: {} val acc: {} test acc: {} ' \
                 .format(temp_network_path, epoch_best_network, train_loss[-1], val_loss[-1], test_loss[-1], train_acc[-1], val_acc[-1], test_acc[-1])
                     )
-
+            print('='*80)
         else:
-            warnings.warn(f'No pre-trained network checkpoint found at "{temp_network_path}"')
-        print('-'*80)
+            print('-'*80)
+            print(f'No pre-trained network checkpoint found at "{temp_network_path}"')
+            print('='*80)
+            # warnings.warn(f'No pre-trained network checkpoint found at "{temp_network_path}"')
         
+        return standardscaler, model_class, network_pyfile
 
 
 class weights_initializer:

@@ -9,7 +9,7 @@ from tqdm import tqdm
 import multiprocessing as mp
 import matplotlib.pyplot as plt
 from collections import defaultdict, OrderedDict
-from ordered_set import OrderedSet
+from orderedset import OrderedSet
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from sklearn.svm import SVC, SVR
 from sklearn.neighbors import KDTree, NearestNeighbors
@@ -57,12 +57,13 @@ __all__ = [
     'compute_descriptors',
     'compute_descriptors_from_name',
     'listsmiles2propdf',
+    'load_or_compute_descriptors',
     'mol_to_fetures',
     'mol_to_fetures_with_descriptor_function',
     
     'calculate_similarities_distances',
     'calculate_similarity_distance',
-    'calculate_fingerprints',
+    'calculate_fingerprint',
     'calculate_all_fingerprints',
     'closest_neighbour_smiles',
     
@@ -873,7 +874,52 @@ def listsmiles2propdf(smiles_list: List[str],
         print(f"Descriptor data saved to: {df_savepath}")
 
     return df
-    
+
+
+def load_or_compute_descriptors(df: pd.DataFrame,
+                                 descriptor_names: List[str],
+                                 smiles_column_name: str = 'smiles',
+                                 df_savepath: str = '',
+                                 ordered_parallel_processing: bool = True
+                                 ) -> pd.DataFrame:
+    """
+    Ensures all required molecular descriptors are present in the DataFrame.
+    Computes missing descriptors and merges them with the existing DataFrame.
+
+    Args:
+        df (pd.DataFrame): Existing DataFrame with SMILES and possibly some descriptors.
+        descriptor_names (List[str]): List of required descriptors.
+        smiles_column_name (str): Column name where SMILES strings are stored.
+        df_savepath (str): Path to save newly computed descriptors (optional).
+        ordered_parallel_processing (bool): Whether to compute descriptors in order and in parallel.
+
+    Returns:
+        pd.DataFrame: DataFrame with all required descriptors.
+    """
+    existing_cols = set(df.columns)
+    required_cols = set(descriptor_names)
+    missing_desc_names = list(required_cols - existing_cols)
+
+    if missing_desc_names:
+        smiles_list = df[smiles_column_name].tolist()
+        new_df = listsmiles2propdf(smiles_list=smiles_list,
+                                   descriptor_names=missing_desc_names,
+                                   df_savepath=None,
+                                   ordered_parallel_processing=ordered_parallel_processing)
+
+        # Ensure column match before merging
+        if 'SMILES' in new_df.columns and smiles_column_name != 'SMILES':
+            new_df = new_df.rename(columns={'SMILES': smiles_column_name})
+
+        final_df = pd.merge(df, new_df, on=smiles_column_name, how='inner')
+
+        if df_savepath:
+            final_df.to_csv(df_savepath, index=False)
+
+        return final_df
+
+    else:
+        return df
 
 
 def mol_to_fetures_with_descriptor_function(smile: str,
@@ -946,213 +992,125 @@ def mol_to_fetures(smile: str) -> Dict[Any | str, Any]:
     return all_descriptors
 
 
-def calculate_all_fingerprints(smiles: Any) -> dict:
-    
-    mol = Chem.MolFromSmiles(smiles)
-    fingerprint_values = {}
-    
-    rdkit = Chem.RDKFingerprint
-    maccskeys = rdMolDescriptors.GetMACCSKeysFingerprint
-    atompair = AllChem.GetAtomPairGenerator().GetFingerprint
-    topological_torsion = AllChem.GetTopologicalTorsionGenerator().GetFingerprint
-    morgan = AllChem.GetMorganGenerator(radius=2).GetFingerprint
-    pattern = Chem.rdmolops.PatternFingerprint
-    
-    all_fingerprints = [rdkit, maccskeys, atompair, topological_torsion, morgan, pattern]
-    fingerprint_names = ['RDKit', 'MACCSkeys', 'AtomPair', 'TopologicalTorsion', 'Morgan', 'Pattern']
-    
-    for i in range(len(all_fingerprints)):
-        array = np.zeros((1,), dtype=int)
-        fp = all_fingerprints[i](mol)
-        DataStructs.ConvertToNumpyArray(fp, array)
-        fingerprint_values[fingerprint_names[i]] = array
+def safe_divide(numerator, denominator):
+    return numerator / denominator if denominator != 0 else float('inf')
 
-    return fingerprint_values
+def get_fingerprint(mol, name: str):
+    
+    if name == 'RDKit':
+        return Chem.RDKFingerprint(mol)
+    elif name == 'Pattern':
+        return Chem.PatternFingerprint(mol)
+    elif name == 'MACCSKeys':
+        return rdMolDescriptors.GetMACCSKeysFingerprint(mol)
+    elif name == 'TopologicalTorsion':
+        return AllChem.GetTopologicalTorsionGenerator().GetFingerprint(mol)
+    elif name == 'Morgan':
+        return AllChem.GetMorganGenerator(radius=2).GetFingerprint(mol)
+    elif name == 'AtomPair':
+        return AllChem.GetAtomPairGenerator().GetFingerprint(mol)
+    else:
+        raise ValueError(f"Invalid fingerprint name: {name}")
 
+def fingerprint_to_array(fp) -> np.ndarray:
+    
+    arr = np.zeros((1,), dtype=int)
+    DataStructs.ConvertToNumpyArray(fp, arr)
+    
+    return arr
 
-# Function to calculate fingerprints
-def calculate_fingerprints(smiles: Any,
-                           fingerprint_name: str = 'RDKit'
-                           ) -> np.ndarray[Any]:
+def calculate_fingerprint(mol: str, fingerprint_name: str) -> np.ndarray:
+# def calculate_fingerprint(smiles: str, fingerprint_name: str) -> np.ndarray:
+    
+    # mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        raise ValueError("Invalid SMILES string")
+    fp = get_fingerprint(mol, fingerprint_name)
+    
+    return fingerprint_to_array(fp)
+
+def get_abcd(fp1: np.ndarray, fp2: np.ndarray) -> Tuple[int, int, int, int]:
+    
+    a = np.sum((fp1 == 1) & (fp2 == 0))
+    b = np.sum((fp1 == 0) & (fp2 == 1))
+    c = np.sum((fp1 == 1) & (fp2 == 1))
+    d = np.sum((fp1 == 0) & (fp2 == 0))
+    
+    return a, b, c, d
+
+def compute_similarity_distance_metrics(a, b, c, d) -> Tuple[dict, dict]:
+    sim = {
+        "Tanimoto": safe_divide(c, a + b + c),
+        "Dice": safe_divide(c, 0.5 * ((a + c) + (b + c))),
+        "Cosine": safe_divide(c, np.sqrt((a + c) * (b + c))),
+        "Russell_Rao": safe_divide(c, a + b + c + d),
+        "Baroni_Urbani": safe_divide((np.sqrt(c * d) + c), (np.sqrt(c * d) + a + b + c)),
+        "Rogers": safe_divide((c + d), (2 * a + 2 * b + c + d)),
+        "Matching_Coefficient": safe_divide((c + d), (a + b + c + d)),
+        "Overlap": c,
+    }
+
+    dist = {
+        "Euclidean": np.sqrt(a + b),
+        "Hamming": a + b,
+        "Mean_Hamming": safe_divide((a + b), (a + b + c + d)),
+        "Soergel": safe_divide((a + b), (a + b + c)),
+        "Pattern": safe_divide((a * b), (a + b + c + d) ** 2),
+        "Variance": safe_divide((a + b), (4 * (a + b + c + d))),
+        "Size": safe_divide((a - b) ** 2, (a + b + c + d) ** 2),
+    }
+    return sim, dist
+
+def calculate_similarities_distances(smiles1: str, smiles2: str, fingerprint_name: str = 'RDKit') -> Tuple[dict, dict]:
+    
+    fp1 = calculate_fingerprint(smiles1, fingerprint_name)
+    fp2 = calculate_fingerprint(smiles2, fingerprint_name)
+    a, b, c, d = get_abcd(fp1, fp2)
+    
+    return compute_similarity_distance_metrics(a, b, c, d)
+
+def calculate_similarity_distance(smiles1: str, smiles2: str, fingerprint_name: str = 'RDKit',
+                                   distance_metric: str = 'Euclidean', similarity_metric: str = 'Tanimoto') -> Tuple[float, float]:
+    
+    fp1 = calculate_fingerprint(smiles1, fingerprint_name)
+    fp2 = calculate_fingerprint(smiles2, fingerprint_name)
+    a, b, c, d = get_abcd(fp1, fp2)
+    sims, dists = compute_similarity_distance_metrics(a, b, c, d)
+
+    if similarity_metric not in sims:
+        raise ValueError(f"Similarity metric not found. Choose from: {list(sims.keys())}")
+    if distance_metric not in dists:
+        raise ValueError(f"Distance metric not found. Choose from: {list(dists.keys())}")
+
+    return sims[similarity_metric], dists[distance_metric]
+
+def closest_neighbour_smiles(smiles: str, smiles_list: List[str], similarity_metric: str = 'Tanimoto',
+                              distance_metric: str = 'Soergel', fingerprint_name: str = 'RDKit') -> Tuple[str, str]:
+    max_sim, min_dist = -1e6, 1e6
+    best_sim_smi, best_dist_smi = '', ''
+
+    for smi in smiles_list:
+        sims, dists = calculate_similarities_distances(smiles, smi, fingerprint_name)
+        sim = sims.get(similarity_metric)
+        dist = dists.get(distance_metric)
+
+        if sim is None or dist is None:
+            continue
+        if sim > max_sim:
+            best_sim_smi, max_sim = smi, sim
+        if dist < min_dist:
+            best_dist_smi, min_dist = smi, dist
+
+    return best_sim_smi, best_dist_smi, max_sim, min_dist
+
+def calculate_all_fingerprints(smiles: str) -> dict:
     
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
         raise ValueError("Invalid SMILES string")
+    names = ['RDKit', 'MACCSKeys', 'AtomPair', 'TopologicalTorsion', 'Morgan', 'Pattern']
     
-    if fingerprint_name == 'RDKit':
-        fingerprint = Chem.RDKFingerprint(mol)
-
-    elif fingerprint_name == 'Pattern':
-        fingerprint = Chem.PatternFingerprint(mol)
-
-    elif fingerprint_name == 'MACCSKeys':
-        fingerprint = rdMolDescriptors.GetMACCSKeysFingerprint(mol)
-        
-    elif fingerprint_name == 'TopologicalTorsion':
-        fpgen = AllChem.GetTopologicalTorsionGenerator()
-        fingerprint = fpgen.GetFingerprint(mol)
-        
-    elif fingerprint_name == 'Morgan':
-        fpgen = AllChem.GetMorganGenerator(radius=2)
-        fingerprint = fpgen.GetFingerprint(mol)
-
-    elif fingerprint_name == 'AtomPair':
-        fpgen = AllChem.GetAtomPairGenerator()
-        fingerprint = fpgen.GetFingerprint(mol)
-        
-    else:
-        raise ValueError("'fingerprints_name' not found in: ['RDKit', 'Pattern', 'TopologicalTorsion', 'MACCSKeys', 'Morgan', 'AtomPair']")
-    
-    # Convert to NumPy arrays for calculations
-    array = np.zeros((1,), dtype=int)
-    DataStructs.ConvertToNumpyArray(fingerprint, array)
-
-    return array
-
-
-def safe_divide(numerator, denominator):
-    return numerator / denominator if denominator != 0 else -1e15
-
-
-# Function to calculate various similarities and distances
-def calculate_similarities_distances(smiles1: str,
-                                     smiles2: str,
-                                     fingerprint_name: str = 'RDKit'
-                                     ) -> Tuple[dict[str, float], dict[str, float]]:
-    
-    fp1 = calculate_fingerprints(smiles=smiles1, fingerprint_name=fingerprint_name)
-    fp2 = calculate_fingerprints(smiles=smiles2, fingerprint_name=fingerprint_name)
-    
-    a = len(np.where((fp1 == 1) & (fp2 == 0))[0]) # present in smiles1 but not in smiles2
-    b = len(np.where((fp1 == 0) & (fp2 == 1))[0]) # present in smiles2 but not in smiles1
-    c = len(np.where((fp1 == 1) & (fp2 == 1))[0]) # present both in smiles1 and smiles2
-    d = len(np.where((fp1 == 0) & (fp2 == 0))[0]) # absent both in smiles1 and smiles2
-    
-    # Similarities
-    tanimoto = safe_divide(c, (a + b + c))
-    dice = safe_divide(c, 0.5 * ((a + c) + (b + c)))
-    cosine = safe_divide(c, np.sqrt((a + c) * (b + c)))
-    russell_rao = safe_divide(c, (a + b + c + d))
-    baroni_urbani = safe_divide((np.sqrt(c * d) + c), (np.sqrt(c * d) + a + b + c))
-    rogers = safe_divide((c + d), (2 * a + 2 * b + c + d))
-    matching = safe_divide((c + d), (a + b + c + d))
-
-    # Distances
-    euclidean = np.sqrt(a + b)  # Euclidean is always valid
-    hamming = a + b  # Hamming, Manhattan, Taxi-Cab, City-Block
-    mean_hamming = safe_divide((a + b), (a + b + c + d))
-    soergel = safe_divide((a + b), (a + b + c))
-    pattern = safe_divide((a * b), (a + b + c + d) ** 2)
-    variance = safe_divide((a + b), (4 * (a + b + c + d)))
-    size = safe_divide((a - b) ** 2, (a + b + c + d) ** 2)
-    
-    similarities = {"Tanimoto": tanimoto,
-                    "Dice": dice,
-                    "Cosine": cosine,
-                    "Rogers": rogers,
-                    "Russell_Rao": russell_rao,
-                    "Baroni_Urbani": baroni_urbani,
-                    "Matching_Coefficient":matching,
-                    "Overlap": c
-                    }
-    
-    distances = {"Euclidean": euclidean,
-                 "Hamming": hamming,
-                 "Mean_Hamming": mean_hamming,
-                 "Soergel": soergel,
-                 "Pattern": pattern,
-                 "Variance": variance,
-                 "Size": size
-                 }
-
-    return similarities, distances
-
-# Function to calculate various similarities and distances
-def calculate_similarity_distance(smiles1: str,
-                                  smiles2: str,
-                                  fingerprint_name: str = 'RDKit',
-                                  distance_metric: str = 'Tanimoto',
-                                  similarity_metric: str = 'Euclidean'
-                                  ) -> Tuple[int | float, int | float]:
-    
-    fp1 = calculate_fingerprints(smiles=smiles1, fingerprint_name=fingerprint_name)
-    fp2 = calculate_fingerprints(smiles=smiles2, fingerprint_name=fingerprint_name)
-    
-    a = len(np.where((fp1 == 1) & (fp2 == 0))[0]) # present in smiles1 but not in smiles2
-    b = len(np.where((fp1 == 0) & (fp2 == 1))[0]) # present in smiles2 but not in smiles1
-    c = len(np.where((fp1 == 1) & (fp2 == 1))[0]) # present both in smiles1 and smiles2
-    d = len(np.where((fp1 == 0) & (fp2 == 0))[0]) # absent both in smiles1 and smiles2
-    
-    # Similarities
-    if similarity_metric == 'Tanimoto':
-        similarity = safe_divide(c, (a + b + c))
-    elif similarity_metric == 'Dice':
-        similarity = safe_divide(c, 0.5 * ((a + c) + (b + c)))
-    elif similarity_metric == 'Cosine':
-        similarity = safe_divide(c, np.sqrt((a + c) * (b + c)))
-    elif similarity_metric == 'Russell_Rao':
-        similarity = safe_divide(c, (a + b + c + d))
-    elif similarity_metric == 'Baroni_Urbani':
-        similarity = safe_divide((np.sqrt(c * d) + c), (np.sqrt(c * d) + a + b + c))
-    elif similarity_metric == 'Rogers':
-        similarity = safe_divide((c + d), (2 * a + 2 * b + c + d))
-    elif similarity_metric == 'Matching_Coefficient':
-        similarity = safe_divide((c + d), (a + b + c + d))
-    else:
-        raise ValueError("similarity metric not found in: ['Tanimoto', 'Dice', 'Cosine', 'Rogers','Russell_Rao', 'Baroni_Urbani', 'Matching_Coefficient', 'Overlap']")
-
-    # Distances
-    if distance_metric == 'Euclidean':
-        distance = np.sqrt(a + b)  # Euclidean is always valid
-    elif distance_metric == 'Hamming':
-        distance = a + b  # Hamming, Manhattan, Taxi-Cab, City-Block
-    elif distance_metric == 'Mean_Hamming':
-        distance = safe_divide((a + b), (a + b + c + d))
-    elif distance_metric == 'Soergel':
-        distance = safe_divide((a + b), (a + b + c))
-    elif distance_metric == 'Pattern':
-        distance = safe_divide((a * b), (a + b + c + d) ** 2)
-    elif distance_metric == 'Variance':
-        distance = safe_divide((a + b), (4 * (a + b + c + d)))
-    elif distance_metric == 'Size':
-        distance = safe_divide((a - b) ** 2, (a + b + c + d) ** 2)
-    else:
-        raise ValueError("distance metric not found in: ['Euclidean', 'Hamming', 'Mean_Hamming', 'Soergel', 'Pattern', 'Variance', 'Size']")
-    
-
-    return similarity, distance
-
-
-def closest_neighbour_smiles(smiles: str,
-                             smiles_list: List[str],
-                             similarity_metric: str = 'Tanimoto',
-                             distance_metric: str = 'Soergel',
-                             fingerprint_name: str = 'RDKit'
-                             ) -> Tuple[str, str]:
-    
-    max_similarity, min_distance = -1e6, 1e6
-    optimum_smiles_similarity, optimum_smiles_distance = '', ''
-    
-    for smi in smiles_list:
-        similarities, distances = calculate_similarities_distances(smiles1=smiles, smiles2=smi, fingerprint_name=fingerprint_name)
-        try:
-            similarity = similarities[similarity_metric]
-        except:
-            raise ValueError('Similarity metric not found in: [Tanimoto, Dice, Cosine, Rogers, Russell-Rao, Baroni-Urbani, Kunczynski]')
-        
-        try:
-            distance = distances[distance_metric]
-        except:
-            raise ValueError('Distance metric not found in: [Hamming, Mean Hamming, Euclidean, Soergel, Pattern, Variance, Size]')
-        
-        if similarity>max_similarity:
-            optimum_smiles_similarity = smi
-            max_similarity = similarity
-        if distance<min_distance:
-            optimum_smiles_distance = smi
-            min_distance = distance
-    
-    return optimum_smiles_similarity, optimum_smiles_distance    
+    return {name: fingerprint_to_array(get_fingerprint(mol, name)) for name in names}
 
 
 def df2cleandf(df: pd.DataFrame,

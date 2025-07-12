@@ -11,6 +11,7 @@ import time
 import pickle
 import random
 import shutil
+import inspect
 import sklearn
 import warnings
 import tempfile
@@ -58,6 +59,7 @@ from IPython.display import display
 
 __all__ = [
     'show_img',
+    'get_param_names',
     'list_diff',
     'create_temp_config',
     'parse_any',
@@ -175,6 +177,14 @@ def show_img(img):
     [display(x) for x in img]
 
     return None
+
+def get_param_names(func):
+    
+    sig = inspect.signature(func)
+    param_list =  [param.name for param in sig.parameters.values()
+            if param.kind in (param.POSITIONAL_OR_KEYWORD, param.KEYWORD_ONLY)]
+    
+    return param_list
 
 def list_diff(list1, list2):
     
@@ -378,7 +388,8 @@ def get_scale_power(value: float) -> int:
 def add_results2df(results: OrderedDict,
                    results_savename: str='./Untitled.csv'):
     
-    results = pd.DataFrame([results])
+    if isinstance(results, OrderedDict):
+        results = pd.DataFrame([results])
     if not os.path.isfile(results_savename):
         results.to_csv(results_savename, index = False)
     else:
@@ -2445,13 +2456,13 @@ def regression_test_metrics(y_true: np.ndarray[float] | List[float],
     fold5, _, _ = percentage_within_fold_change(y_true=y_true, y_pred=y_pred, fold=5)
     
     
-    results = OrderedDict({'mse':round_up(mse_test, 2),
-                           'rmse':round_up(rmse_test, 2),
-                           'mae':round_up(mae_test, 2),
-                           'r2':round_up(r2_val_test, 2),
-                           'fold2':round_up(fold2, 2),
-                           'fold3':round_up(fold3, 2),
-                           'fold5':round_up(fold5, 2)
+    results = OrderedDict({'mse':round(mse_test, 2),
+                           'rmse':round(rmse_test, 2),
+                           'mae':round(mae_test, 2),
+                           'r2':round(r2_val_test, 2),
+                           'fold2':round(fold2, 2),
+                           'fold3':round(fold3, 2),
+                           'fold5':round(fold5, 2)
                            })
     
     return results

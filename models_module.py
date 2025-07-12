@@ -42,9 +42,13 @@ __all__ = [
     'GCN',
     'GCN_Connected',
     'MRGCN',
+    'ChemBERTa',
     'ChemBERTaRegressorroberta',
     'ChemBERTaRegressor',
     'ChemBERTaRegressorwithMultiheadAttention',
+    'ChemBERTaRegressorwithAttention',
+    'ChemBERTaRegressorwithLSTM',
+    'ChemBERTaRegressorRNN',
     'AdditiveAttention',
     'DotProductAttention',
     'UnifiedAttention',
@@ -96,19 +100,28 @@ def activation_func(name='relu', alpha=1.0, negative_slope=1e-2):
     
 
 def make_mlp(list_dims, dropout=0.0, act_func='relu', norm_type='layer', alpha=1.0, negative_slope=1e-2):
+    
     """
-    Construct a multi-layer perceptron with optional per-layer activation, normalization, and dropout.
+    Constructs a multi-layer perceptron (MLP) using a sequence of linear layers, each optionally followed by 
+    normalization, activation, and dropout layers.
 
     Args:
-        list_dims (list of int): List of layer dimensions.
-        dropout (float): Dropout rate.
-        act_func (Union[str, list of str]): Single activation function name or list of names per layer.
-        norm_type (str): Normalization type: 'batch', 'layer', or None.
-        alpha (float): Alpha parameter for ELU/CELU.
-        negative_slope (float): Negative slope for LeakyReLU.
+        list_dims (List[int]): A list specifying the input, hidden, and output dimensions. 
+                               For example, [128, 256, 64, 1] creates 3 layers.
+        dropout (float): Dropout rate to apply after each activation (except the final layer). Default is 0.0.
+        act_func (Union[str, List[str], None]): Activation function(s) to use. 
+            - If a single string (e.g., 'relu', 'elu', 'leakyrelu'), it is used for all hidden layers.
+            - If a list of strings, it must have `len(list_dims) - 2` entries (for hidden layers only).
+            - If None, no activation is applied.
+        norm_type (str): Type of normalization to apply after each linear layer:
+            - 'batch' for BatchNorm1d
+            - 'layer' for LayerNorm
+            - None for no normalization.
+        alpha (float): The α parameter used for ELU/CELU activations. Default is 1.0.
+        negative_slope (float): The negative slope parameter used for LeakyReLU. Default is 1e-2.
 
     Returns:
-        nn.Sequential: Assembled MLP model.
+        nn.Sequential: A fully constructed MLP as a `torch.nn.Sequential` block.
     """
     layers = nn.ModuleList([])
 
@@ -1831,19 +1844,14 @@ class ChemBERTaRegressorroberta(RobertaPreTrainedModel):
             
         return x
     
-    
-class ChemBERTaRegressor(nn.Module):
+
+class ChemBERTa(nn.Module):
     """
     Task:
         ChemBERTa-based regressor for molecular property prediction using AutoModel.
     """
     def __init__(self,
                  model_name: str,
-                 list_dims: list[int],
-                 dropout: float = 0.2,
-                 act_func: str = 'relu',
-                 norm_type: str = 'layer',
-                 max_position_embeddings: int = 0
                  ):
         """
         Task:
@@ -1859,20 +1867,9 @@ class ChemBERTaRegressor(nn.Module):
         """
         super().__init__()
         self.model_name = model_name
-        self.dropout = dropout
-        self.act_func = act_func
-        self.max_position_embeddings = max_position_embeddings
-        self.norm_type = norm_type
         self.config = AutoConfig.from_pretrained(model_name)
         self.chemberta = AutoModel.from_pretrained(model_name, config=self.config)
 
-        hidden_size = self.config.hidden_size
-        self.list_dims = [hidden_size, ] + list_dims
-        if self.max_position_embeddings>0:
-            self.position_embeddings = nn.Embedding(max_position_embeddings, hidden_size)
-
-        self.regressor = make_mlp(list_dims=self.list_dims, dropout=self.dropout, act_func=self.act_func, norm_type=self.norm_type)
-        
         
     def __repr__(self):
         """
@@ -1882,27 +1879,18 @@ class ChemBERTaRegressor(nn.Module):
         Output:
             str: Model name and configuration.
         """
-        out =  (f"{self.__class__.__name__}(model_name={self.model_name}, "
-                f"list_dims={self.list_dims}, dropout={self.dropout}, "
-                f"act_func={self.act_func}, norm_type={self.norm_type})")
+        out =  (f"{self.__class__.__name__}(model_name={self.model_name})")
         
         return out
     
-    def token_embeddings(self, input_ids, attention_mask):
+    def token_embeddings(self, input_ids, attention_mask, **kwargs):
+        
         outputs = self.chemberta(input_ids=input_ids, attention_mask=attention_mask)
         token_embed = outputs.last_hidden_state  # [B, T, H]
 
-        if self.max_position_embeddings>0:
-            # Add positional embeddings
-            B, T = input_ids.size()
-            position_ids = torch.arange(T, dtype=torch.long, device=input_ids.device)  # [T]
-            position_ids = position_ids.unsqueeze(0).expand(B, T)  # [B, T]
-            pos_embed = self.position_embeddings(position_ids)  # [B, T, H]
-            token_embed = token_embed + pos_embed  # [B, T, H]
-
         return token_embed
 
-    def embeddings(self, input_ids, attention_mask):
+    def embeddings(self, input_ids, attention_mask, **kwargs):
         """
         Task:
             Compute mean-pooled embedding over valid token positions.
@@ -1914,13 +1902,83 @@ class ChemBERTaRegressor(nn.Module):
         Output:
             Tensor: Mean pooled embedding of shape [B, H].
         """
-        last_hidden = self.token_embeddings(input_ids=input_ids, attention_mask=attention_mask)
-        masked_embed = (last_hidden * attention_mask.unsqueeze(-1)).sum(1)
+        token_embed = self.token_embeddings(input_ids=input_ids, attention_mask=attention_mask)
+        masked_embed = (token_embed * attention_mask.unsqueeze(-1)).sum(1)
         denom = attention_mask.sum(1, keepdim=True).clamp(min=1e-6)
-        return masked_embed / denom  # mean pooling
+        x = masked_embed / denom  # mean pooling
+        
+        return x
+    
+    def forward(self, input_ids, attention_mask, **kwargs):
+        """
+        Task:
+            Perform forward pass for regression prediction.
+
+        Input:
+            input_ids (Tensor): Tokenized inputs.
+            attention_mask (Tensor): Valid attention positions.
+
+        Output:
+            Tensor: Regression prediction.
+        """
+        x = self.embeddings(input_ids=input_ids, attention_mask=attention_mask)
+        return x
     
 
-    def forward(self, input_ids, attention_mask):
+class ChemBERTaRegressor(ChemBERTa):
+    """
+    Task:
+        ChemBERTa-based regressor for molecular property prediction using AutoModel.
+    """
+    def __init__(self,
+                 model_name: str,
+                 list_dims: list[int],
+                 dropout: float = 0.2,
+                 act_func: str = 'relu',
+                 norm_type: str = 'layer',
+                 ):
+        """
+        Task:
+            Initialize model with a pretrained transformer and a regression MLP.
+
+        Input:
+            model_name (str): Huggingface model identifier (e.g., 'seyonec/ChemBERTa').
+            list_dims (list[int]): Dimensions for the MLP head.
+            dropout (float): Dropout probability.
+
+        Output:
+            None
+        """
+        super().__init__(model_name=model_name)
+        self.model_name = model_name
+        self.dropout = dropout
+        self.act_func = act_func
+        self.norm_type = norm_type
+
+        self.hidden_size = self.config.hidden_size
+        self.list_dims = [self.hidden_size, ] + list_dims
+        self.regressor = make_mlp(list_dims=self.list_dims, dropout=self.dropout, act_func=self.act_func, norm_type=self.norm_type)
+        
+        
+    def __repr__(self):
+        """
+        Task:
+            String representation of the model including its name and configuration.
+
+        Output:
+            str: Model name and configuration.
+        """
+        out =  (f"{self.__class__.__name__}(\n"
+                f"  model_name={self.model_name},\n"
+                f"  list_dims={self.list_dims},\n"
+                f"  dropout={self.dropout},\n"
+                f"  act_func={self.act_func},\n"
+                f"  norm_type={self.norm_type}\n)")
+        
+        return out
+    
+
+    def forward(self, input_ids, attention_mask, **kwargs):
         """
         Task:
             Perform forward pass for regression prediction.
@@ -1935,6 +1993,98 @@ class ChemBERTaRegressor(nn.Module):
         x = self.embeddings(input_ids=input_ids, attention_mask=attention_mask)
         x = self.regressor(x)
         return x
+    
+
+
+class ChemBERTaRegressorwithAttention(ChemBERTaRegressor):
+    """
+    Task:
+        ChemBERTa-based regressor with PyTorch's native multi-head attention for molecular property prediction.
+    """
+    def __init__(self,
+                 model_name: str,
+                 list_dims: list[int],
+                 dropout: float = 0.2,
+                 act_func: str = 'relu',
+                 norm_type: str = 'layer',
+                 num_heads: int = 4,
+                 mode: str = 'dot',  # Ignored for native attention
+                 max_position_embeddings: int = 0
+                 ):
+        """
+        Initialize model with pretrained ChemBERTa and native PyTorch multi-head attention.
+        """
+        self.model_name = model_name
+        self.list_dims = list_dims
+        self.dropout = dropout
+        self.act_func = act_func
+        self.norm_type = norm_type
+        self.num_heads = num_heads
+        self.mode = mode
+        self.max_position_embeddings = max_position_embeddings
+        
+        super().__init__(
+            model_name=model_name,
+            list_dims=list_dims,
+            dropout=dropout,
+            act_func=act_func,
+            norm_type=norm_type
+        )
+
+        hidden_dim = self.config.hidden_size
+        self.attn = nn.MultiheadAttention(embed_dim=hidden_dim, num_heads=num_heads, dropout=dropout, batch_first=True)
+
+        if self.max_position_embeddings > 0:
+            self.position_embeddings = nn.Embedding(max_position_embeddings, hidden_dim)
+
+    def __repr__(self):
+        return (f"{self.__class__.__name__}(\n"
+                f"  model_name={self.model_name},\n"
+                f"  list_dims={self.list_dims},\n"
+                f"  dropout={self.dropout},\n"
+                f"  act_func={self.act_func},\n"
+                f"  norm_type={self.norm_type},\n"
+                f"  num_heads={self.num_heads},\n"
+                f"  mode={self.mode},\n"
+                f"  max_position_embeddings={self.max_position_embeddings}\n)")
+
+    def token_embeddings(self, input_ids, attention_mask):
+        token_embed = super().token_embeddings(input_ids=input_ids, attention_mask=attention_mask)  # [B, T, H]
+
+        if self.max_position_embeddings > 0:
+            B, T = input_ids.size()
+            position_ids = torch.arange(T, dtype=torch.long, device=input_ids.device).unsqueeze(0).expand(B, T)
+            pos_embed = self.position_embeddings(position_ids)
+            token_embed = token_embed + pos_embed  # [B, T, H]
+
+        return token_embed
+
+    def embeddings(self, input_ids, attention_mask, **kwargs):
+        embed = self.token_embeddings(input_ids=input_ids, attention_mask=attention_mask)  # [B, T, H]
+
+        # Convert attention_mask to key_padding_mask (True = ignore, False = attend)
+        key_padding_mask = ~attention_mask.bool()  # [B, T]
+
+        # Apply multi-head self-attention (query=key=value=embed)
+        attn_output, _ = self.attn(embed, embed, embed, key_padding_mask=key_padding_mask)  # [B, T, H]
+
+        # Pool over the sequence dimension (mean pooling over valid tokens)
+        attn_output = attn_output.masked_fill(key_padding_mask.unsqueeze(-1), 0.0)  # [B, T, H]
+        lengths = attention_mask.sum(dim=1).clamp(min=1).unsqueeze(1)  # [B, 1]
+        pooled = attn_output.sum(dim=1) / lengths  # [B, H]
+
+        return pooled
+
+    def forward(self, input_ids, attention_mask, **kwargs):
+        """
+        Perform forward pass for regression prediction using native multi-head attention.
+        """
+        x = self.embeddings(input_ids=input_ids, attention_mask=attention_mask)
+        x = self.regressor(x)
+        return x
+
+
+
     
 class ChemBERTaRegressorwithMultiheadAttention(ChemBERTaRegressor):
     """
@@ -1966,6 +2116,11 @@ class ChemBERTaRegressorwithMultiheadAttention(ChemBERTaRegressor):
         Output:
             None
         """
+        self.model_name = model_name
+        self.list_dims = list_dims
+        self.dropout = dropout
+        self.act_func = act_func
+        self.norm_type = norm_type
         self.num_heads = num_heads
         self.mode = mode
         self.max_position_embeddings = max_position_embeddings
@@ -1976,8 +2131,7 @@ class ChemBERTaRegressorwithMultiheadAttention(ChemBERTaRegressor):
                         list_dims=list_dims,
                         dropout=dropout,
                         act_func=act_func,
-                        norm_type=norm_type,
-                        max_position_embeddings=max_position_embeddings
+                        norm_type=norm_type
                         )
         # self.multihead_attn = nn.MultiheadAttention(embed_dim=self.config.hidden_size, num_heads=num_heads, dropout=dropout)
         
@@ -1987,11 +2141,35 @@ class ChemBERTaRegressorwithMultiheadAttention(ChemBERTaRegressor):
             self.multihead_attn = MultiHeadAttention(embed_dim=self.config.hidden_size, num_heads=num_heads, mode=self.mode)
         else:
             print('-'*80)
-            print("No multi-head attention applied. Using single attention layer instead.")
+            print("No multi-head attention applied. Using only pooling attention layer instead.")
             print('-'*80)
         self.attn_layer = nn.Linear(self.config.hidden_size, 1)
         
-    def embeddings(self, input_ids, attention_mask):
+    def __repr__(self):
+        return (f"{self.__class__.__name__}(\n"
+                f"  model_name={self.model_name},\n"
+                f"  list_dims={self.list_dims},\n"
+                f"  dropout={self.dropout},\n"
+                f"  act_func={self.act_func},\n"
+                f"  norm_type={self.norm_type},\n"
+                f"  num_heads={self.num_heads},\n"
+                f"  mode={self.mode},\n"
+                f"  max_position_embeddings={self.max_position_embeddings}\n)")
+        
+    def token_embeddings(self, input_ids, attention_mask):
+        token_embed = super().token_embeddings(input_ids=input_ids, attention_mask=attention_mask)# [B, T, H]
+
+        if self.max_position_embeddings>0:
+            # Add positional embeddings
+            B, T = input_ids.size()
+            position_ids = torch.arange(T, dtype=torch.long, device=input_ids.device)  # [T]
+            position_ids = position_ids.unsqueeze(0).expand(B, T)  # [B, T]
+            pos_embed = self.position_embeddings(position_ids)  # [B, T, H]
+            token_embed = token_embed + pos_embed  # [B, T, H]
+
+        return token_embed
+        
+    def embeddings(self, input_ids, attention_mask, **kwargs):
         
         embed = self.token_embeddings(input_ids=input_ids, attention_mask=attention_mask)# [B, T, H]
         # print(f'embed.shape = {embed.shape}')
@@ -2009,7 +2187,7 @@ class ChemBERTaRegressorwithMultiheadAttention(ChemBERTaRegressor):
         
         return pooled
     
-    def forward(self, input_ids, attention_mask):
+    def forward(self, input_ids, attention_mask, **kwargs):
         """
         Task:
             Perform forward pass for regression prediction with attention.
@@ -2024,6 +2202,210 @@ class ChemBERTaRegressorwithMultiheadAttention(ChemBERTaRegressor):
         x = self.embeddings(input_ids=input_ids, attention_mask=attention_mask)
         x = self.regressor(x)
         return x
+    
+ 
+
+class ChemBERTaRegressorwithLSTM(ChemBERTa):
+    """
+    Task:
+        ChemBERTa-based regressor enhanced with LSTM for capturing sequential molecular token patterns.
+    """
+
+    def __init__(self,
+                 model_name: str,
+                 list_dims: list[int],
+                 lstm_hidden: int = 256,
+                 lstm_layers: int = 1,
+                 bidirectional: bool = True,
+                 dropout: float = 0.2,
+                 act_func: str = 'relu',
+                 norm_type: str = 'layer'):
+        """
+        Initialize model components: ChemBERTa, LSTM, and MLP regressor.
+        """
+        super().__init__(model_name=model_name)
+        self.model_name = model_name
+        self.dropout = dropout
+        self.act_func = act_func
+        self.lstm_layers = lstm_layers
+        self.norm_type = norm_type
+        self.bidirectional = bidirectional
+        self.lstm_hidden = lstm_hidden
+
+        self.lstm = nn.LSTM(
+            input_size=self.config.hidden_size,
+            hidden_size=lstm_hidden,
+            num_layers=self.lstm_layers,
+            batch_first=True,
+            dropout=dropout if lstm_layers > 1 else 0.0,
+            bidirectional=bidirectional
+        )
+
+        lstm_out_dim = lstm_hidden * (2 if bidirectional else 1)
+        self.list_dims = [lstm_out_dim] + list_dims
+        self.regressor = make_mlp(list_dims=self.list_dims,
+                                  dropout=self.dropout,
+                                  act_func=self.act_func,
+                                  norm_type=self.norm_type)
+        
+    def __repr__(self):
+        return (f"{self.__class__.__name__}(\n"
+                f"  model_name={self.model_name},\n"
+                f"  lstm_hidden={self.lstm_hidden},\n"
+                f"  bidirectional={self.bidirectional},\n"
+                f"  list_dims={self.list_dims},\n"
+                f"  dropout={self.dropout},\n"
+                f"  act_func={self.act_func},\n"
+                f"  norm_type={self.norm_type},\n"
+                f"  lstm_layers={self.lstm_layers}\n)")
+
+    def embeddings(self, input_ids, attention_mask, **kwargs):
+        """
+        Task:
+            Compute LSTM-based embedding from token embeddings of ChemBERTa.
+
+        Input:
+            input_ids (Tensor): Tokenized input IDs of shape [B, T].
+            attention_mask (Tensor): Corresponding attention mask [B, T].
+
+        Output:
+            Tensor: LSTM output embedding [B, H] where H depends on bidirectionality.
+        """
+        token_embed = self.token_embeddings(input_ids=input_ids, attention_mask=attention_mask)  # [B, T, H]
+        lengths = attention_mask.sum(dim=1).cpu()
+        packed_input = nn.utils.rnn.pack_padded_sequence(token_embed, lengths, batch_first=True, enforce_sorted=False)
+        packed_output, (hn, cn) = self.lstm(packed_input)
+        
+        if self.bidirectional:
+            final_embedding = torch.cat([hn[-2], hn[-1]], dim=1)  # [B, 2*H]
+        else:
+            final_embedding = hn[-1]  # [B, H]
+
+        return final_embedding
+
+    def forward(self, input_ids, attention_mask, **kwargs):
+        """
+        Task:
+            Perform forward pass: LSTM-based embedding + MLP regression.
+
+        Input:
+            input_ids (Tensor): Tokenized input sequences [B, T].
+            attention_mask (Tensor): Attention mask indicating valid tokens [B, T].
+
+        Output:
+            Tensor: Regression prediction [B, output_dim].
+        """
+        x = self.embeddings(input_ids=input_ids, attention_mask=attention_mask)
+        x = self.regressor(x)
+        
+        return x
+    
+
+class ChemBERTaRegressorRNN(ChemBERTa):
+    """
+    Task:
+        ChemBERTa-based regressor using a configurable RNN block (LSTM or GRU) for sequential modeling.
+    """
+
+    def __init__(self,
+                 model_name: str,
+                 list_dims: list[int],
+                 rnn_type: str = 'lstm',
+                 rnn_hidden: int = 256,
+                 rnn_layers: int = 1,
+                 bidirectional: bool = True,
+                 dropout: float = 0.2,
+                 act_func: str = 'relu',
+                 norm_type: str = 'layer'):
+        """
+        Initialize ChemBERTa, RNN (LSTM or GRU), and MLP regressor.
+
+        Input:
+            model_name (str): Huggingface ChemBERTa model name.
+            list_dims (list[int]): List of MLP hidden/output dims.
+            rnn_type (str): 'lstm' or 'gru'.
+            rnn_hidden (int): Hidden size of the RNN.
+            rnn_layers (int): Number of RNN layers.
+            bidirectional (bool): Use bidirectional RNN.
+            dropout (float): Dropout rate.
+            act_func (str): Activation function in MLP.
+            norm_type (str): Normalization type in MLP.
+        """
+        super().__init__(model_name=model_name)
+        self.model_name = model_name
+        self.rnn_type = rnn_type.lower()
+        self.dropout = dropout
+        self.act_func = act_func
+        self.rnn_layers = rnn_layers
+        self.norm_type = norm_type
+        self.bidirectional = bidirectional
+        self.rnn_hidden = rnn_hidden
+
+        rnn_cls = nn.LSTM if self.rnn_type == 'lstm' else nn.GRU
+
+        self.lstm = rnn_cls(
+            input_size=self.config.hidden_size,
+            hidden_size=rnn_hidden,
+            num_layers=self.rnn_layers,
+            batch_first=True,
+            dropout=dropout if rnn_layers > 1 else 0.0,
+            bidirectional=bidirectional
+        )
+
+        rnn_out_dim = rnn_hidden * (2 if bidirectional else 1)
+        self.list_dims = [rnn_out_dim] + list_dims
+
+        self.regressor = make_mlp(list_dims=self.list_dims,
+                                  dropout=self.dropout,
+                                  act_func=self.act_func,
+                                  norm_type=self.norm_type)
+
+    def __repr__(self):
+        
+        out = (f"{self.__class__.__name__}(\n"
+               f"   model_name={self.model_name},\n"
+               f"   rnn_type={self.rnn_type},\n"
+               f"   rnn_hidden={self.rnn_hidden},\n"
+               f"   bidirectional={self.bidirectional},\n"
+               f"   list_dims={self.list_dims},\n"
+               f"   dropout={self.dropout},\n"
+               f"   act_func={self.act_func},\n"
+               f"   norm_type={self.norm_type},\n"
+               f"   rnn_layers={self.rnn_layers}\n)")
+        
+        return out
+
+    def embeddings(self, input_ids, attention_mask, **kwargs):
+        """
+        Compute embedding from RNN output based on token-level ChemBERTa embeddings.
+
+        Output:
+            Tensor: [B, H]
+        """
+        token_embed = self.token_embeddings(input_ids=input_ids, attention_mask=attention_mask)
+        lengths = attention_mask.sum(dim=1).cpu()
+
+        packed_input = nn.utils.rnn.pack_padded_sequence(token_embed, lengths, batch_first=True, enforce_sorted=False)
+        if self.rnn_type == 'lstm':
+            packed_output, (hn, _) = self.lstm(packed_input)
+        else:
+            packed_output, hn = self.lstm(packed_input)
+
+        if self.bidirectional:
+            final_embedding = torch.cat([hn[-2], hn[-1]], dim=1)
+        else:
+            final_embedding = hn[-1]
+
+        return final_embedding
+
+    def forward(self, input_ids, attention_mask, **kwargs):
+        
+        x = self.embeddings(input_ids=input_ids, attention_mask=attention_mask)
+        x =  self.regressor(x)
+        
+        return x
+
+
     
 class AdditiveAttention(nn.Module):
     """
