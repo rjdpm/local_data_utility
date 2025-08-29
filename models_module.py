@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
+import inspect
 import numpy as np
-import math, os, pickle
+import math, os, pickle, sys
 from collections import OrderedDict
 
 import torch
@@ -13,7 +14,8 @@ from transformers import ViTModel, ViTFeatureExtractor
 from transformers import RobertaModel, RobertaPreTrainedModel
 from transformers import AutoModel, AutoConfig
 
-
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from Generalised_data_utils import auto_repr, collect_class_definitions
 
 __all__ = [
     'network_pyfile',
@@ -82,15 +84,15 @@ def activation_func(name='relu', alpha=1.0, negative_slope=1e-2):
     elif name == 'tanh':
         return nn.Tanh()
     elif name == 'relu':
-        return nn.ReLU(inplace=True)
+        return nn.ReLU()
     elif name == 'selu':
-        return nn.SELU(inplace=True)
+        return nn.SELU()
     elif name == 'elu':
-        return nn.ELU(alpha, inplace=True)
+        return nn.ELU(alpha)
     elif name == 'leakyrelu':
-        return nn.LeakyReLU(negative_slope, inplace=True)
+        return nn.LeakyReLU(negative_slope)
     elif name == 'celu':
-        return nn.CELU(alpha, inplace=True)
+        return nn.CELU(alpha)
     elif name == 'gelu':
         return nn.GELU()
     elif name is None:
@@ -116,6 +118,7 @@ def make_mlp(list_dims, dropout=0.0, act_func='relu', norm_type='layer', alpha=1
         norm_type (str): Type of normalization to apply after each linear layer:
             - 'batch' for BatchNorm1d
             - 'layer' for LayerNorm
+            - 'NA' for No Normalization
             - None for no normalization.
         alpha (float): The α parameter used for ELU/CELU activations. Default is 1.0.
         negative_slope (float): The negative slope parameter used for LeakyReLU. Default is 1e-2.
@@ -130,29 +133,33 @@ def make_mlp(list_dims, dropout=0.0, act_func='relu', norm_type='layer', alpha=1
     if isinstance(act_func, (str, None)):
         act_funcs = [activation_func(act_func, alpha=alpha, negative_slope=negative_slope)] * (num_layers - 1)
     elif isinstance(act_func, list):
-        if len(act_func) != num_layers - 1:
-            raise ValueError(f"Length of act_func list must match number of hidden layers {(len(list_dims) - 2)}.")
+        assert (len(act_func) != num_layers - 1), f"Length of act_func list {len(act_func)} must match the number of hidden layers {(len(list_dims) - 2)}."
         act_funcs = [activation_func(name, alpha=alpha, negative_slope=negative_slope) for name in act_func]
     else:
         raise TypeError("act_func must be a string or a list of strings.")
 
-    for i in range(num_layers):
-        in_dim = list_dims[i]
-        out_dim = list_dims[i + 1]
-        layers.append(nn.Linear(in_dim, out_dim))
+    if num_layers > 0:
+        for i in range(num_layers):
+            in_dim = list_dims[i]
+            out_dim = list_dims[i + 1]
+            layers.append(nn.Linear(in_dim, out_dim))
 
-        if i < num_layers - 1:
-            # Normalization
-            if norm_type == 'batch':
-                layers.append(nn.BatchNorm1d(out_dim))
-            elif norm_type == 'layer':
-                layers.append(nn.LayerNorm(out_dim))
-            elif norm_type is not None:
-                raise ValueError(f"Unsupported normalization type: {norm_type}")
-            
-            # Activation and Dropout
-            layers.append(act_funcs[i])
-            layers.append(nn.Dropout(dropout))
+            if i < num_layers - 1:
+                # Normalization
+                if norm_type == 'batch':
+                    layers.append(nn.BatchNorm1d(out_dim))
+                elif norm_type == 'layer':
+                    layers.append(nn.LayerNorm(out_dim))
+                elif norm_type == 'NA':
+                    layers.append(nn.Identity())
+                elif norm_type is not None:
+                    raise ValueError(f"Unsupported normalization type: {norm_type}")
+                
+                # Activation and Dropout
+                layers.append(act_funcs[i])
+                layers.append(nn.Dropout(dropout))
+    else:
+        layers.append(nn.Identity())
 
     return nn.Sequential(*layers)
 
@@ -1067,6 +1074,9 @@ class TFT(nn.Module):
 
         self.output_layer = TimeDistributed(nn.Linear(self.hidden_size, self.num_quantiles), batch_first=True).to(self.device)
         
+    def __repr__(self):
+        return auto_repr(self)
+        
     def init_hidden(self):
         """Initializes LSTM hidden state."""
         return torch.zeros(self.lstm_layers, self.batch_size, self.hidden_size, device=self.device)
@@ -1264,6 +1274,9 @@ class LSTMnetwork(nn.Module):
         self.linear3 = nn.Linear(32, 16)
         self.linear4 = nn.Linear(16, 1)
         self.relu = nn.ReLU()
+        
+    def __repr__(self):
+        return auto_repr(self)
 
     def forward(self, sent1, sent2):
         """Processes two input sequences and outputs a similarity score."""
@@ -1314,6 +1327,9 @@ class ViT(nn.Module):
         self.final = nn.Linear(self.base.config.hidden_size, num_classes)
         self.num_classes = num_classes
         self.relu = nn.ReLU()
+        
+    def __repr__(self):
+        return auto_repr(self)
 
     def forward(self, pixel_values):
         """Processes image data and returns classification logits."""
@@ -1335,19 +1351,25 @@ class SMILESLinearNet(nn.Module):
     Outputs:
         - Tensor of shape [batch_size, output_dim] after passing through linear layers.
     """
-    def __init__(self, list_dims, dropout):
+    def __init__(self, list_dims, dropout=0.2, act_func='relu', norm_type='layer'):
         super(SMILESLinearNet, self).__init__()
         
-        self.model_script = None
-        self.layers = nn.ModuleList([nn.Linear(list_dims[i], list_dims[i+1]) for i in range(len(list_dims) - 1)])
-        self.batch_norms = nn.ModuleList([nn.BatchNorm1d(list_dims[i+1]) for i in range(len(list_dims) - 2)])
-        self.dropout = nn.Dropout(dropout)
+        self.class_def = inspect.getsource(self.__class__)
+        self.network_pyfile = network_pyfile
+        self.MLP = make_mlp(list_dims=list_dims,
+                            dropout=dropout,
+                            act_func=act_func,
+                            norm_type=norm_type
+                            )
         
         # Weight Initialization
-        for layer in self.layers:
+        for layer in self.MLP:
             if isinstance(layer, nn.Linear):
                 nn.init.xavier_uniform_(layer.weight)
                 nn.init.zeros_(layer.bias)
+                
+    def __repr__(self):
+        return auto_repr(self)
     
     def forward(self, x):
         """
@@ -1360,15 +1382,7 @@ class SMILESLinearNet(nn.Module):
         Outputs:
             - Tensor: Output tensor after final linear layer.
         """
-        for i in range(len(self.layers)):
-            if i < len(self.layers) - 1:
-                x = F.relu(self.layers[i](x)) 
-                x = self.batch_norms[i](x) 
-                x = self.dropout(x) 
-            else:
-                x = self.layers[i](x) 
-        
-        return x
+        return self.MLP(x)
 
 
 class GCNLayer(nn.Module):
@@ -1386,6 +1400,9 @@ class GCNLayer(nn.Module):
     def __init__(self, in_features, out_features):
         super(GCNLayer, self).__init__()
         self.linear = nn.Linear(in_features, out_features)
+        
+    def __repr__(self):
+        return auto_repr(self)
 
     def forward(self, x, adjacency_matrix):
         """
@@ -1420,7 +1437,8 @@ class GCN(nn.Module):
     """
     def __init__(self, list_dims_gcn, list_dims_fc, dropout, max_num_atom):
         super(GCN, self).__init__()
-        self.model_script = network_pyfile
+        self.class_def = inspect.getsource(self.__class__)
+        self.network_pyfile = network_pyfile
         self.max_num_atom = max_num_atom
         self.gcn_layers = nn.ModuleList([GCNLayer(list_dims_gcn[i], list_dims_gcn[i+1]) for i in range(len(list_dims_gcn) - 1)])
         self.gcn_layer_norms = nn.ModuleList([nn.LayerNorm(list_dims_gcn[i+1]) for i in range(len(list_dims_gcn) - 2)])
@@ -1431,6 +1449,9 @@ class GCN(nn.Module):
         self.fc_layers = nn.ModuleList([nn.Linear(list_dims_fc[i], list_dims_fc[i+1]) for i in range(len(list_dims_fc) - 1)])
         self.fc_layer_norms = nn.ModuleList([nn.LayerNorm(list_dims_fc[i+1]) for i in range(len(list_dims_fc) - 2)])
         self.dropout = nn.Dropout(dropout)
+        
+    def __repr__(self):
+        return auto_repr(self)
         
     def get_features(self, x, adjacency_matrices, degree_matrices):
         """
@@ -1516,7 +1537,8 @@ class GCN_Connected(nn.Module):
     """
     def __init__(self, list_dims_gcn, list_dims_fc, dropout, type_='concat'):
         super().__init__()
-        self.model_script = network_pyfile
+        self.class_def = inspect.getsource(self.__class__)
+        self.network_pyfile = network_pyfile
         self.type_ = type_
         
         # GCN layers with LayerNorms for stability, except on last GCN layer
@@ -1532,6 +1554,9 @@ class GCN_Connected(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.param1 = nn.Parameter(torch.tensor(1.0))
         self.param2 = nn.Parameter(torch.tensor(1.0)) 
+        
+    def __repr__(self):
+        return auto_repr(self)
         
     def get_features(self, x, adjacency_matrices, degree_matrices, y):
         """
@@ -1619,6 +1644,9 @@ class RGCNConv(nn.Module):
         self.self_loop_weight = nn.Parameter(torch.Tensor(in_channels, out_channels))
         self.bias = nn.Parameter(torch.Tensor(out_channels)) if bias else None
         self.reset_parameters()
+        
+    def __repr__(self):
+        return auto_repr(self)
 
     def reset_parameters(self):
         """Task: Initialize parameters using Xavier initialization."""
@@ -1675,11 +1703,28 @@ class MRGCN(nn.Module):
     Outputs:
         - Tensor: Final prediction or representation [batch_size, output_dim]
     """
-    def __init__(self, list_dims_gcn, list_dims_fc, dropout, max_num_atom, num_relations=4):#):
+    def __init__(self,
+                 list_dims_gcn,
+                 list_dims_fc,
+                 dropout,
+                 max_num_atom,
+                 num_relations=4,
+                 act_func='relu',
+                 act_func_gcn='relu',
+                 norm_type='layer',
+                 alpha=1.0,
+                 negative_slope=1e-2
+                 ):#):
         super().__init__()
         self.max_num_atom = max_num_atom
+        self.list_dims_gcn = list_dims_gcn
+        self.list_dims_fc = list_dims_fc
         self.num_relations = num_relations
-        self.model_script = network_pyfile
+        self.class_def = inspect.getsource(self.__class__)
+        self.network_pyfile = network_pyfile
+        self.act_func = act_func
+        self.act_func_gcn = act_func_gcn
+        self.norm_type = norm_type
 
         # GCN Layers
         self.gcn_layers = nn.ModuleList([
@@ -1689,34 +1734,19 @@ class MRGCN(nn.Module):
         self.gcn_layer_norms = nn.ModuleList([
             nn.LayerNorm(list_dims_gcn[i + 1]) for i in range(len(list_dims_gcn) - 2)
         ])
-        
-        ## GCN output to Feature Representation
-        # self.fc_layers_feat = nn.ModuleList([
-        #     nn.Linear(in_features=list_dims_gcn[-1],out_features=list_dims_gcn[-1], bias=False) for _ in range(2)
-        # ])
-        # self.fc_layer_norms_feat = nn.ModuleList([
-        #     nn.LayerNorm(list_dims_gcn[-1]) for _ in range(len(self.fc_layers_feat) - 1)
-        # ])
 
         # Fully connected layers
-        self.fc_conn = nn.Linear(list_dims_gcn[-1], list_dims_fc[0])
-        self.fc_layers = nn.ModuleList([
-            nn.Linear(list_dims_fc[i], list_dims_fc[i + 1]) for i in range(len(list_dims_fc) - 1)
-        ])
-        self.fc_layer_norms = nn.ModuleList([
-            nn.LayerNorm(list_dims_fc[i + 1]) for i in range(len(list_dims_fc) - 2)
-        ])
         self.dropout = nn.Dropout(dropout)
+        self.activation_func_gcn = activation_func(self.act_func_gcn, alpha=alpha, negative_slope=negative_slope)
+        if len(self.list_dims_fc) >0:
+            self.fc_conn = nn.Linear(list_dims_gcn[-1], list_dims_fc[0])
+            self.input2repr = make_mlp(list_dims=list_dims_fc, dropout=dropout, act_func=act_func, norm_type=norm_type)
+        else:
+            self.fc_conn = nn.Identity()
+            self.input2repr = nn.Identity()
         
-    def input2repr(self, x, layers, layer_norms, dropout):
-        for i in range(len(layers)):
-            if i < len(layers) - 1:
-                x = F.relu(layers[i](x))
-                x = layer_norms[i](x)
-                x = dropout(x)
-            else:
-                x = layers[i](x)
-        return x
+    def __repr__(self):
+        return auto_repr(self)
 
     def get_features(self, x, adjacency_tensor, degree_tensor):
         """
@@ -1731,12 +1761,12 @@ class MRGCN(nn.Module):
         Outputs:
             - Tensor: Aggregated graph features [batch_size, gcn_out_dim]
         """
-        adjacency_tensor = normalize_adjacency(adjacency_tensor=adjacency_tensor,
-                                                            degree_tensor=degree_tensor
-                                                            )
+        adjacency_tensor = normalize_adjacency(adjacency=adjacency_tensor,
+                                               degree=degree_tensor
+                                               )
         for i in range(len(self.gcn_layers)):
             if i < len(self.gcn_layers) - 1:
-                x = F.relu(self.gcn_layers[i](x, adjacency_tensor))
+                x = self.activation_func_gcn(self.gcn_layers[i](x, adjacency_tensor))
                 x = self.gcn_layer_norms[i](x)
                 x = self.dropout(x)
             else:
@@ -1744,11 +1774,10 @@ class MRGCN(nn.Module):
 
         # Average over nodes for each graph in the batch
         x = x.mean(dim=1)
-        # x = self.input2repr(x, layers=self.fc_layers_feat, layer_norms=self.fc_layer_norms_feat, dropout=self.dropout)
         self.feature_dim = x.shape[-1]
         return x
 
-    def forward(self, x, adjacency_tensor, degree_tensor):
+    def forward(self, feature_vector, adjacency_tensor, degree_tensor):
         """
         Task:
             Forward pass from graph input to final prediction via GCN and FC layers.
@@ -1761,10 +1790,10 @@ class MRGCN(nn.Module):
         Outputs:
             - Tensor: Final prediction/representation
         """
-        x = self.get_features(x, adjacency_tensor, degree_tensor)
+        x = self.get_features(feature_vector, adjacency_tensor, degree_tensor)
         # x = x.mean(dim=1).unsqueeze(1)
         x = self.fc_conn(x)
-        x = self.input2repr(x, self.fc_layers, self.fc_layer_norms, self.dropout)
+        x = self.input2repr(x)
         return x#.squeeze()
     
 class ChemBERTaRegressorroberta(RobertaPreTrainedModel):
@@ -1852,6 +1881,10 @@ class ChemBERTa(nn.Module):
     """
     def __init__(self,
                  model_name: str,
+                 list_dims: list[int],
+                 dropout: float = 0.2,
+                 act_func: str = 'relu',
+                 norm_type: str = 'layer',
                  ):
         """
         Task:
@@ -1866,9 +1899,20 @@ class ChemBERTa(nn.Module):
             None
         """
         super().__init__()
+        self.class_def = collect_class_definitions(self)
+        self.network_pyfile=network_pyfile
+        
         self.model_name = model_name
+        self.list_dims = list_dims
+        self.dropout = dropout
+        self.act_func = act_func
+        self.norm_type = norm_type
         self.config = AutoConfig.from_pretrained(model_name)
         self.chemberta = AutoModel.from_pretrained(model_name, config=self.config)
+        
+        self.hidden_size = self.config.hidden_size
+        self.list_dims = [self.hidden_size, ] + list_dims
+        self.regressor = make_mlp(list_dims=self.list_dims, dropout=self.dropout, act_func=self.act_func, norm_type=self.norm_type)
 
         
     def __repr__(self):
@@ -1879,9 +1923,7 @@ class ChemBERTa(nn.Module):
         Output:
             str: Model name and configuration.
         """
-        out =  (f"{self.__class__.__name__}(model_name={self.model_name})")
-        
-        return out
+        return auto_repr(self)
     
     def token_embeddings(self, input_ids, attention_mask, **kwargs):
         
@@ -1903,9 +1945,7 @@ class ChemBERTa(nn.Module):
             Tensor: Mean pooled embedding of shape [B, H].
         """
         token_embed = self.token_embeddings(input_ids=input_ids, attention_mask=attention_mask)
-        masked_embed = (token_embed * attention_mask.unsqueeze(-1)).sum(1)
-        denom = attention_mask.sum(1, keepdim=True).clamp(min=1e-6)
-        x = masked_embed / denom  # mean pooling
+        x = token_embed[:, 0]  # CLS token
         
         return x
     
@@ -1922,6 +1962,8 @@ class ChemBERTa(nn.Module):
             Tensor: Regression prediction.
         """
         x = self.embeddings(input_ids=input_ids, attention_mask=attention_mask)
+        x = self.regressor(x)
+        
         return x
     
 
@@ -1949,7 +1991,12 @@ class ChemBERTaRegressor(ChemBERTa):
         Output:
             None
         """
-        super().__init__(model_name=model_name)
+        super().__init__(model_name=model_name,
+                         list_dims=list_dims,
+                         dropout=dropout,
+                         act_func=act_func,
+                         norm_type=norm_type
+                         )
         self.model_name = model_name
         self.dropout = dropout
         self.act_func = act_func
@@ -1959,23 +2006,25 @@ class ChemBERTaRegressor(ChemBERTa):
         self.list_dims = [self.hidden_size, ] + list_dims
         self.regressor = make_mlp(list_dims=self.list_dims, dropout=self.dropout, act_func=self.act_func, norm_type=self.norm_type)
         
-        
-    def __repr__(self):
+    
+    def embeddings(self, input_ids, attention_mask, **kwargs):
         """
         Task:
-            String representation of the model including its name and configuration.
+            Compute mean-pooled embedding over valid token positions.
+
+        Input:
+            input_ids (Tensor): Input token IDs of shape [B, T].
+            attention_mask (Tensor): Attention mask of shape [B, T].
 
         Output:
-            str: Model name and configuration.
+            Tensor: Mean pooled embedding of shape [B, H].
         """
-        out =  (f"{self.__class__.__name__}(\n"
-                f"  model_name={self.model_name},\n"
-                f"  list_dims={self.list_dims},\n"
-                f"  dropout={self.dropout},\n"
-                f"  act_func={self.act_func},\n"
-                f"  norm_type={self.norm_type}\n)")
+        token_embed = self.token_embeddings(input_ids=input_ids, attention_mask=attention_mask)
+        masked_embed = (token_embed * attention_mask.unsqueeze(-1)).sum(1)
+        denom = attention_mask.sum(1, keepdim=True).clamp(min=1e-6)
+        x = masked_embed / denom  # mean pooling
         
-        return out
+        return x
     
 
     def forward(self, input_ids, attention_mask, **kwargs):
@@ -2037,17 +2086,6 @@ class ChemBERTaRegressorwithAttention(ChemBERTaRegressor):
         if self.max_position_embeddings > 0:
             self.position_embeddings = nn.Embedding(max_position_embeddings, hidden_dim)
 
-    def __repr__(self):
-        return (f"{self.__class__.__name__}(\n"
-                f"  model_name={self.model_name},\n"
-                f"  list_dims={self.list_dims},\n"
-                f"  dropout={self.dropout},\n"
-                f"  act_func={self.act_func},\n"
-                f"  norm_type={self.norm_type},\n"
-                f"  num_heads={self.num_heads},\n"
-                f"  mode={self.mode},\n"
-                f"  max_position_embeddings={self.max_position_embeddings}\n)")
-
     def token_embeddings(self, input_ids, attention_mask):
         token_embed = super().token_embeddings(input_ids=input_ids, attention_mask=attention_mask)  # [B, T, H]
 
@@ -2082,9 +2120,7 @@ class ChemBERTaRegressorwithAttention(ChemBERTaRegressor):
         x = self.embeddings(input_ids=input_ids, attention_mask=attention_mask)
         x = self.regressor(x)
         return x
-
-
-
+    
     
 class ChemBERTaRegressorwithMultiheadAttention(ChemBERTaRegressor):
     """
@@ -2144,17 +2180,6 @@ class ChemBERTaRegressorwithMultiheadAttention(ChemBERTaRegressor):
             print("No multi-head attention applied. Using only pooling attention layer instead.")
             print('-'*80)
         self.attn_layer = nn.Linear(self.config.hidden_size, 1)
-        
-    def __repr__(self):
-        return (f"{self.__class__.__name__}(\n"
-                f"  model_name={self.model_name},\n"
-                f"  list_dims={self.list_dims},\n"
-                f"  dropout={self.dropout},\n"
-                f"  act_func={self.act_func},\n"
-                f"  norm_type={self.norm_type},\n"
-                f"  num_heads={self.num_heads},\n"
-                f"  mode={self.mode},\n"
-                f"  max_position_embeddings={self.max_position_embeddings}\n)")
         
     def token_embeddings(self, input_ids, attention_mask):
         token_embed = super().token_embeddings(input_ids=input_ids, attention_mask=attention_mask)# [B, T, H]
@@ -2223,7 +2248,11 @@ class ChemBERTaRegressorwithLSTM(ChemBERTa):
         """
         Initialize model components: ChemBERTa, LSTM, and MLP regressor.
         """
-        super().__init__(model_name=model_name)
+        super().__init__(model_name=model_name,
+                         list_dims=list_dims,
+                         dropout=dropout,
+                         act_func=act_func,
+                         norm_type=norm_type)
         self.model_name = model_name
         self.dropout = dropout
         self.act_func = act_func
@@ -2248,17 +2277,6 @@ class ChemBERTaRegressorwithLSTM(ChemBERTa):
                                   act_func=self.act_func,
                                   norm_type=self.norm_type)
         
-    def __repr__(self):
-        return (f"{self.__class__.__name__}(\n"
-                f"  model_name={self.model_name},\n"
-                f"  lstm_hidden={self.lstm_hidden},\n"
-                f"  bidirectional={self.bidirectional},\n"
-                f"  list_dims={self.list_dims},\n"
-                f"  dropout={self.dropout},\n"
-                f"  act_func={self.act_func},\n"
-                f"  norm_type={self.norm_type},\n"
-                f"  lstm_layers={self.lstm_layers}\n)")
-
     def embeddings(self, input_ids, attention_mask, **kwargs):
         """
         Task:
@@ -2331,7 +2349,11 @@ class ChemBERTaRegressorRNN(ChemBERTa):
             act_func (str): Activation function in MLP.
             norm_type (str): Normalization type in MLP.
         """
-        super().__init__(model_name=model_name)
+        super().__init__(model_name=model_name,
+                         list_dims=list_dims,
+                         dropout=dropout,
+                         act_func=act_func,
+                         norm_type=norm_type)
         self.model_name = model_name
         self.rnn_type = rnn_type.lower()
         self.dropout = dropout
@@ -2359,21 +2381,6 @@ class ChemBERTaRegressorRNN(ChemBERTa):
                                   dropout=self.dropout,
                                   act_func=self.act_func,
                                   norm_type=self.norm_type)
-
-    def __repr__(self):
-        
-        out = (f"{self.__class__.__name__}(\n"
-               f"   model_name={self.model_name},\n"
-               f"   rnn_type={self.rnn_type},\n"
-               f"   rnn_hidden={self.rnn_hidden},\n"
-               f"   bidirectional={self.bidirectional},\n"
-               f"   list_dims={self.list_dims},\n"
-               f"   dropout={self.dropout},\n"
-               f"   act_func={self.act_func},\n"
-               f"   norm_type={self.norm_type},\n"
-               f"   rnn_layers={self.rnn_layers}\n)")
-        
-        return out
 
     def embeddings(self, input_ids, attention_mask, **kwargs):
         """

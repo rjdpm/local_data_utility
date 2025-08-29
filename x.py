@@ -4,7 +4,6 @@ import ast
 import sys
 import csv
 import pytz
-import shap
 import copy
 import json
 import math
@@ -24,85 +23,71 @@ from tqdm import tqdm
 from pympler import asizeof
 import matplotlib
 # matplotlib.use('TkAgg')
-from umap.umap_ import UMAP
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from datetime import datetime
 from contextlib import contextmanager
-from ordered_set import OrderedSet
 from collections import OrderedDict
-from typing import Any, List, Tuple, Union, Callable, Optional, Dict
-
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.preprocessing import label_binarize
-from sklearn.manifold import MDS, TSNE, Isomap
-from sklearn.decomposition import PCA, KernelPCA, FactorAnalysis, TruncatedSVD
-from sklearn.discriminant_analysis import LinearDiscriminantAnalysis as LDA
 from sklearn.metrics import root_mean_squared_error, mean_absolute_error, r2_score
-from sklearn.metrics import (accuracy_score, confusion_matrix,
-                             ConfusionMatrixDisplay, classification_report,
-                             roc_curve, auc, precision_recall_curve
+from sklearn.model_selection import train_test_split
+from torch.utils.data import DataLoader, Subset
+from ordered_set import OrderedSet
+from sklearn.ensemble import RandomForestRegressor
+from typing import Any, List, Tuple, Union, Callable, Optional, Dict
+from sklearn.preprocessing import label_binarize
+from sklearn.metrics import (accuracy_score,
+                             confusion_matrix,
+                             ConfusionMatrixDisplay,
+                             classification_report,
+                             roc_curve,
+                             auc,
+                             precision_recall_curve
                              )
 
 
 import torch
 import torch.nn as nn
 from IPython.display import display
-from torch.utils.data import DataLoader, Subset
+
+# class utility:
+    
+    
+#     def __init__(self):
+        
+#         pass
+
 
 __all__ = [
     'show_img',
     'list_diff',
+    'create_temp_config',
+    'parse_any',
+    'create_file',
+    'list2json',
+    'load_json',
+    'Normalize',
     'save_images',
+    'dict_to_csv',
     'matrix2onehot_encode',
     'datetime_now',
     'round_up',
-    'get_scale_power',
-    'execution_time',
-    
-    'parse_any',
-    'Normalize',
     'fix_seed',
-    'auto_repr',
-    'get_func_input_names',
-    'suppress_output',
     'python_object_size',
-    'get_own_methods',
-    'get_own_methods_with_docstrings',
-    'collect_class_definitions',
+    'get_scale_power',
+    'add_results2df',
     
-    'create_file',
-    'create_temp_config',
     'create_folder',
-    'list2json',
-    'dict2json',
-    'load_json',
     'save_list2json',
     'save2pickle',
     'load_from_pickle',
     'read_data_from_excel',
-    'dict_to_csv',
-    'savedict2json',
-    'add_results2df',
-    'read_csv2list',
-    'read_csv2array',
-    'read_csv2dict',
-    'write_csv_columnwise',
-    'write_csv_rowwise',
-    'writer_dict_csv',
-    'save_dict_csv_pandas',
-    'save_dict_pickle',
-    'load_dict_pickle',
-    'line_count_csv_file',
+    'suppress_output',
     
     'data_partition_random_indices',
     'data_split_random_df',
     'selective_range_data_sampling',
     'selective_range_data_split',
-    'classify_columns',
     
-    'exclude_strings',
     'str2chars',
     'liststr2chars',
     'padding',
@@ -116,8 +101,6 @@ __all__ = [
     
     'PCA_fit_transform',
     'KMeans_fit_predict',
-    'apply_reductions',
-    'plot_reductions',
     
     'plot_3d',
     'plot_2d',
@@ -126,6 +109,19 @@ __all__ = [
     'convex_combination',
     'convex_PCA',
     'convex_inv_PCA',
+    'execution_time',
+    'save_dict_csv_pandas',
+    'save_dict_pickle',
+    'load_dict_pickle',
+    'line_count_csv_file',
+    'exclude_strings',
+    
+    'read_csv2list',
+    'read_csv2array',
+    'read_csv2dict',
+    'write_csv_columnwise',
+    'write_csv_rowwise',
+    'writer_dict_csv',
     
     'euc_dist',
     'hyperspherical_distance',
@@ -157,7 +153,6 @@ __all__ = [
     'remove_highly_correlated_columns',
     'hierarchical_feature_selection',
     'data_stat',
-    'find_outliers_iqr',
     
     'plot_distribution_compair',
     'plot_multiple_distribution',
@@ -171,9 +166,7 @@ __all__ = [
     'regression_test_metrics',
     'subset_loader',
     'count_linear_layers',
-    
     'ClassificationResultAnalyzer',
-    'TrendAnalyser',
 ]
     
     
@@ -184,246 +177,15 @@ def show_img(img):
 
     return None
 
-
 def list_diff(list1, list2):
     
    temp =  [item for item in list1 if item not in list2]
    
    return temp
 
-# Given drug images it will save the images in the given path with their corresponding names :-
-def save_images(img, name_list, save_path):
-
-    save_path = create_folder(save_path)
-    drug_iter = iter(name_list)
-    for im in img:
-        drug_name = next(drug_iter)
-        im.save(save_path + drug_name + '.png')
-
-    return None
-
-def matrix2onehot_encode(matrix):
-
-    '''Matrix should be 3-dimesional matrix'''
-
-    if torch.is_tensor(matrix):
-        matrix = matrix.detach().numpy()
-
-    idx = np.argmax(matrix, axis = 2)
-    one_hot_enc = np.zeros_like(matrix)
-    for k in range(matrix.shape[0]):
-        for j in range(matrix.shape[1]):
-            one_hot_enc[k, j, idx[k, j]] = 1
-
-    return one_hot_enc
-
-def datetime_now(path=True):
-    
-    ist = pytz.timezone('Asia/Kolkata')
-    dt = datetime.now(ist).strftime('%Y%m%d_%H_%M_%S' if path else '%Y/%m/%d [%H:%M:%S]')
-    date, time = datetime.now(ist).strftime('Date_%Y_%m_%d'), datetime.now(ist).strftime('Time_%H_%M_%S')
-    
-    return dt, date, time
-
-def execution_time(func, *args):
-
-    tic = time.time()
-    func_value = func(*args)#Calculate function value
-    toc = time.time()
-
-    return (toc - tic), func_value
-
-def round_up(num: float = 1.987,
-             digit: int = 2
-             ) -> float:
-    
-    if len(str(num).split('.')[-1]) >= digit:
-        dec = 10**digit
-        temp = math.floor(num * dec) / dec
-    else:
-        temp = num
-    
-    return temp
-
-def get_scale_power(value: float) -> int:
-    """
-    Returns the power of 10 scale a value falls into.
-    - For example, 0.1 to 0.9 => -1, 1 to 9 => 0, 10 to 99 => 1, etc.
-    - Handles negative values and 0 appropriately.
-
-    Parameters:
-        value (float): The input value.
-
-    Returns:
-        int: The scale as a power of 10.
-    """
-    if value == 0:
-        return float('-inf')  # Logarithmically undefined scale
-    abs_value = abs(value)
-    log_value = math.log10(abs_value)
-    powerof10 = int(math.floor(log_value))
-    
-    return powerof10
-
-def parse_any(value):
-    try:
-        return int(value)
-    except ValueError:
-        try:
-            return float(value)
-        except ValueError:
-            return str(value)
-        
-# Function to Normalize an array :-
-def Normalize(array):
-    
-    mean, std = np.mean(array), np.std(array)
-    result = (array - mean)/std
-    
-    return result
-        
-def get_func_input_names(func):
-    
-    sig = inspect.signature(func)
-    param_list =  [param.name for param in sig.parameters.values()
-            if param.kind in (param.POSITIONAL_OR_KEYWORD, param.KEYWORD_ONLY)]
-    
-    return param_list
-
-def get_own_methods(child_cls):
-    """
-    Retrieve methods defined directly within a given class and distinguish them 
-    from methods inherited from parent classes.
-
-    Parameters:
-        child_cls (type): The class object to inspect.
-
-    Returns:
-        Tuple[
-            List[Tuple[str, Callable]],  # Methods defined in the class itself
-            List[Tuple[str, Callable]]   # Methods inherited from parent classes
-            ]: 
-            A tuple containing two lists:
-            - The first list consists of (method_name, method_object) tuples 
-              for methods defined directly in the class.
-            - The second list contains methods inherited from any superclass.
-    """
-    own_method_names = set(child_cls.__dict__)
-    all_methods = inspect.getmembers(child_cls, predicate=inspect.isfunction)
-    
-    own_methods = [(name, method) for name, method in all_methods if name in own_method_names]
-    inherited_methods = [(name, method) for name, method in all_methods if name not in own_method_names]
-    
-    return own_methods, inherited_methods
-
-def get_own_methods_with_docstrings(class_):
-    """
-    Extracts the docstrings of all methods defined directly within the given class.
-
-    This function inspects the class and returns a dictionary mapping the names of 
-    methods that are explicitly defined in the class (i.e., not inherited) to their 
-    respective docstrings.
-
-    Parameters:
-        class_ (type): The class object to inspect.
-
-    Returns:
-        dict: A dictionary where keys are method names (str) and values are 
-              their corresponding docstrings (str). If a method lacks a docstring, 
-              the value will be the placeholder string "(No docstring provided)".
-    """
-    own_method_names = set(class_.__dict__)
-    method_docs = {}
-    
-    for name, method in inspect.getmembers(class_, predicate=inspect.isfunction):
-        if name in own_method_names:
-            doc = inspect.getdoc(method)
-            method_docs[name] = doc or "(No docstring provided)"
-    
-    return method_docs
-
-
-def fix_seed(np_seed=30, torch_seed=30, random_seed=30):
-    
-    random.seed(random_seed)
-    np.random.seed(np_seed)
-    torch.manual_seed(torch_seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(torch_seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-        
-        
-def auto_repr(self):
-    """
-    Generalized __repr__ for classes.
-    Constructs a multi-line string showing the class name and __init__ arguments with their current values.
-    """
-    cls_name = self.__class__.__name__
-    try:
-        sig = inspect.signature(self.__init__)
-        args = [p for p in sig.parameters if p != "self"]
-    except Exception:
-        args = list(vars(self).keys())
-
-    body = ",\n  ".join(f"{k}={repr(getattr(self, k, None))}" for k in args)
-    
-    return f"{cls_name}(\n  {body}\n)"
-
-def collect_class_definitions(self):
-    """
-    Collect source code for all classes in the inheritance chain.
-    """
-    definitions = []
-    for cls in self.__class__.__mro__[::-1]:  # base to top
-        if cls in (object, nn.Module):
-            continue
-        definitions.append(inspect.getsource(cls))
-        
-    return "\n".join(definitions)
-
-
-def python_object_size(obj: Union[str, Any], use_deep_size: bool = False) -> str:
-    """
-    Get the size of a file or Python object in a human-readable format.
-
-    Parameters:
-        obj (str or Any): Path to the file or any Python object.
-        use_deep_size (bool): Whether to use deep size estimation for objects.
-
-    Returns:
-        str: Size of the object in KB, MB, or GB.
-    """
-    if isinstance(obj, str) and os.path.isfile(obj):
-        size = os.path.getsize(obj)
-    else:
-        size = asizeof.asizeof(obj) if use_deep_size else sys.getsizeof(obj)
-
-    if size < 1024:
-        return f"{size} bytes"
-    elif size < 1024**2:
-        return f"{size / 1024:.2f} KB"
-    elif size < 1024**3:
-        return f"{size / 1024**2:.2f} MB"
-    else:
-        return f"{size / 1024**3:.2f} GB"
-
-@contextmanager
-def suppress_output():
-    """Context manager to suppress prints in a block of code."""
-    with open(os.devnull, 'w') as devnull:
-        old_stdout = sys.stdout
-        sys.stdout = devnull
-        try:
-            yield
-        finally:
-            sys.stdout = old_stdout
-
-def create_folder(folder_name: str) -> str:
-    
+def create_folder(folder_name):
     if len(folder_name):
         if not os.path.isdir(folder_name):
-            print(f'Creating Folder:{folder_name}')
             os.makedirs(folder_name)
         
     return folder_name
@@ -459,6 +221,16 @@ def create_temp_config(config_path, section, **kwargs):
     
     return temp_config_path
 
+
+def parse_any(value):
+    try:
+        return int(value)
+    except ValueError:
+        try:
+            return float(value)
+        except ValueError:
+            return str(value)
+
 class NumpyJSONEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, np.integer):
@@ -486,37 +258,45 @@ def list2json(input_list, filename='untitled', filepath='./'):
 
     with open(full_path, 'w') as json_file:
         json.dump(input_list, json_file, indent=4, cls=NumpyJSONEncoder)
-    print(f'File saved to: {full_path}')
 
     return None
+# def list2json(input_list, filename='untitled', filepath='./'):
+    
+#     with open(f'{filepath}/{filename}.json', 'w') as json_file:
+#         json.dump([s for s in input_list], json_file, indent=4)
+        
+#     return None
 
 # Function to load a json file :-
 def load_json(path):
 
-    with open(path, 'r') as fp:
-        data = json.loads(fp.read())
+    with open(path, 'r') as file:
+        data = json.loads(file.read())
 
     return data
 
-def dict2json(dict_, filename='untitled', filepath='./'):
+
+# Function to Normalize an array :-
+def Normalize(array):
     
-    # with open(f'{filepath}/{filename}.json', 'w') as json_file:
-    #     json.dump(json_str, json_file, indent=4)#, cls=NumpyJSONEncoder)
-    json_str = json.dumps(dict_, indent=4)
-    with open(f'{filepath}/{filename}.json', "w") as f:
-        f.write(json_str)
+    mean, std = np.mean(array), np.std(array)
+    result = (array - mean)/std
+    
+    return result
 
-def savedict2json(data: dict, path: str):
-    """Save a dictionary to a readable JSON file, converting sets to lists."""
-    def convert(obj):
-        if isinstance(obj, set):
-            return sorted(list(obj))#, key=len, reverse=True)
-        return obj
 
-    serializable_data = {k: convert(v) for k, v in data.items()}
 
-    with open(path, 'w') as f:
-        json.dump(serializable_data, f, indent=4)
+# Given drug images it will save the images in the given path with their corresponding names :-
+def save_images(img, name_list, save_path):
+
+    save_path = create_folder(save_path)
+    drug_iter = iter(name_list)
+    for im in img:
+        drug_name = next(drug_iter)
+        im.save(save_path + drug_name + '.png')
+
+    return None
+
 
 # Function to change a dictionary object to a csv file :-
 def dict_to_csv(dictionary: dict, header: list, filepath: str, filename: str):
@@ -530,18 +310,119 @@ def dict_to_csv(dictionary: dict, header: list, filepath: str, filename: str):
 
         for row in zip(keys, values):
             writer.writerow(row)
-            
+
+
+def matrix2onehot_encode(matrix):
+
+    '''Matrix should be 3-dimesional matrix'''
+
+    if torch.is_tensor(matrix):
+        matrix = matrix.detach().numpy()
+
+    idx = np.argmax(matrix, axis = 2)
+    one_hot_enc = np.zeros_like(matrix)
+    for k in range(matrix.shape[0]):
+        for j in range(matrix.shape[1]):
+            one_hot_enc[k, j, idx[k, j]] = 1
+
+    return one_hot_enc
+
+def datetime_now(path=True):
+    
+    ist = pytz.timezone('Asia/Kolkata')
+    dt = datetime.now(ist).strftime('%Y%m%d_%H_%M_%S' if path else '%Y/%m/%d [%H:%M:%S]')
+    date, time = datetime.now(ist).strftime('Date_%Y_%m_%d'), datetime.now(ist).strftime('Time_%H_%M_%S')
+    
+    return dt, date, time
+
+def round_up(num: float = 1.987,
+             digit: int = 2
+             ) -> float:
+    
+    if len(str(num).split('.')[-1]) >= digit:
+        dec = 10**digit
+        temp = math.floor(num * dec) / dec
+    else:
+        temp = num
+    
+    return temp
+
+def fix_seed(np_seed=30, torch_seed=30, random_seed=30):
+    
+    random.seed(random_seed)
+    np.random.seed(np_seed)
+    torch.manual_seed(torch_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(torch_seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+def python_object_size(obj: Union[str, Any], use_deep_size: bool = False) -> str:
+    """
+    Get the size of a file or Python object in a human-readable format.
+
+    Parameters:
+        obj (str or Any): Path to the file or any Python object.
+        use_deep_size (bool): Whether to use deep size estimation for objects.
+
+    Returns:
+        str: Size of the object in KB, MB, or GB.
+    """
+    if isinstance(obj, str) and os.path.isfile(obj):
+        size = os.path.getsize(obj)
+    else:
+        size = asizeof.asizeof(obj) if use_deep_size else sys.getsizeof(obj)
+
+    if size < 1024:
+        return f"{size} bytes"
+    elif size < 1024**2:
+        return f"{size / 1024:.2f} KB"
+    elif size < 1024**3:
+        return f"{size / 1024**2:.2f} MB"
+    else:
+        return f"{size / 1024**3:.2f} GB"
+
+
+    
+def get_scale_power(value: float) -> int:
+    """
+    Returns the power of 10 scale a value falls into.
+    - For example, 0.1 to 0.9 => -1, 1 to 9 => 0, 10 to 99 => 1, etc.
+    - Handles negative values and 0 appropriately.
+
+    Parameters:
+        value (float): The input value.
+
+    Returns:
+        int: The scale as a power of 10.
+    """
+    if value == 0:
+        return float('-inf')  # Logarithmically undefined scale
+    abs_value = abs(value)
+    log_value = math.log10(abs_value)
+    powerof10 = int(math.floor(log_value))
+    
+    return powerof10
+
 def add_results2df(results: OrderedDict,
                    results_savename: str='./Untitled.csv'):
     
-    if isinstance(results, OrderedDict):
-        results = pd.DataFrame([results])
+    results = pd.DataFrame([results])
     if not os.path.isfile(results_savename):
         results.to_csv(results_savename, index = False)
     else:
         df = pd.read_csv(results_savename)
         df = pd.concat([df, results], ignore_index=True)
         df.to_csv(results_savename, index=False)
+
+def create_folder(folder_name: str) -> str:
+    
+    if len(folder_name):
+        if not os.path.isdir(folder_name):
+            print(f'Creating Folder:{folder_name}')
+            os.makedirs(folder_name)
+        
+    return folder_name
 
 
 def save_list2json(file_: list,
@@ -582,156 +463,18 @@ def read_data_from_excel(file_path: str, sheet_num: int = 0):
     
     return df
 
-def save_dict_csv_pandas(dict_name, save_filename='temp_save_filename.csv'):
-
-    # create folder (if not) 
-    _ = create_folder(save_filename[:-len(save_filename.split('/')[-1])])
-    pd.DataFrame.from_dict(dict_name).to_csv(save_filename, index=False)
-
-
-
-def save_dict_pickle(dict_name, save_filename='temp_save_filename.pkl', protocol=4):
-
-    # create folder (if not) 
-    _ = create_folder(save_filename[:-len(save_filename.split('/')[-1])])
-    with open(save_filename,'wb') as f:
-        pickle.dump(dict_name, f, protocol=protocol)
-
-
-
-def load_dict_pickle(input_filename):
-    
-    with open(input_filename,'rb') as f:
-        dict_name = pickle.load(f)
-
-    return dict_name
-
-
-
-def line_count_csv_file(filename, chunksize=1000):
-
-    print('Counting number of data point in: "{}"' .format(filename))
-    count = 0
-    for chunk in tqdm(pd.read_csv(filename, usecols=[0], chunksize=chunksize)):
-        count += len(chunk)
-
-    return count
-
-def read_csv2list(file_path):
-    
-    '''
-    - Reads a .csv file in the given filepath and returns it in a list format.
-    '''
-
-    with open(file_path, mode ='r')as file:
-        csv_reader = csv.reader(file)
-
-        headers = next(csv_reader)
-        rows = []
-        # displaying the contents of the CSV file
-        for line in csv_reader:
-            rows.append(line)
-
-    return rows, headers
-
-
-
-def read_csv2array(file_path):
-
-    file_ = pd.read_csv(file_path)
-    file_ = np.array(file_)
-
-    return file_
-
-
-def read_csv2dict(file_path):
-
-    read_dict = {}
-
-    with open(file_path, newline='') as csvfile:
-        reader = csv.DictReader(csvfile)
-        headers = reader.fieldnames
-        i=0
-        for row in reader:
-            read_dict[i] = row
-            i+=1
-
-    return read_dict, headers
-
-
-
-def write_csv_columnwise(file_path, file_name, headers = [], column_list = []):
-    
-    '''
-    - headers : This must be the list of strings of the filednames.
-    - column_list : This must be list of lists. First element of column_list should be the first column of the csv file.
-       
-    - **csv file will contain number of rows = min of column lengths of the given column list.
-    '''
-
-    if len(headers) == len(column_list):
-
-        save_path = create_file(file_path, file_name)
-
-        min_len = sorted(len(column_list[i]) for i in range(len(column_list)))[0]
-        dicts = {}
-        
-        with open(save_path, mode ='w') as file:
-            writer = csv.DictWriter(file, fieldnames=headers)
-            writer.writeheader()
+@contextmanager
+def suppress_output():
+    """Context manager to suppress prints in a block of code."""
+    with open(os.devnull, 'w') as devnull:
+        old_stdout = sys.stdout
+        sys.stdout = devnull
+        try:
+            yield
+        finally:
+            sys.stdout = old_stdout
             
-            for j in range(min_len):
-                for i in range(len(column_list)):
-                    dicts[headers[i]] = column_list[i][j]
-
-                writer.writerow(dicts)
-
-    else:
-        raise AttributeError(f'header length = {len(headers)} not equal length of column list = {len(column_list)}')
-    
-    file_ = pd.read_csv(save_path)
-    return file_
-
-
-
-def write_csv_rowwise(file_path, file_name, rows: list, headers = []):
-
-
-    '''
-    - rows: This must be list of lists. For example: first element of rows should be the first row of the csv file.
-    - headers: This must be the list of strings of the filednames.
-    '''
-
-    file_path = create_file(file_path, file_name)
-
-    with open(file_path, 'w') as csvfile:
-        writer = csv.writer(csvfile)
-        writer.writerow(headers)
-        
-        for row in rows:
-            writer.writerow(row)
-
-    file_ = pd.read_csv(file_path)
-
-    return file_
-
-
-
-def writer_dict_csv(*dicts, headers, file_path, file_name):
-
-    file_path = create_file(file_path, file_name)
-
-    with open(file_path, 'w') as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=headers)
-        writer.writeheader()
-
-        for d in dicts:
-            writer.writerow(d)
-
-    file_ = pd.read_csv(file_path)
-
-    return file_
-       
+            
 # dataset partion indices
 def data_partition_random_indices(num_data_points, train_ratio=0.5, val_ratio=0.2, test_ratio=0.3):
     
@@ -746,69 +489,17 @@ def data_partition_random_indices(num_data_points, train_ratio=0.5, val_ratio=0.
     return idx_train, idx_val, idx_test
 
 
-def data_split_random_df(df, ratios=(0.7, 0.2, 0.1), labels=None, seed=None, split_column = 'Data_Split'):
-    """
-    Randomly split a DataFrame into n partitions based on given ratios.
+def data_split_random_df(df, ratio=(0.5, 0.3, 0.2)):
     
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Input dataframe.
-    ratios : tuple or list of floats
-        Fractions for each split (should sum to 1.0).
-    labels : list of str, optional
-        Names for each split. If None, defaults to ['Split_1', 'Split_2', ...].
-    seed : int, optional
-        Random seed for reproducibility.
-    
-    Returns
-    -------
-    df : pd.DataFrame
-        DataFrame with an added 'Data_Split' column indicating the partition.
-    """
-    if not np.isclose(sum(ratios), 1.0):
-        raise ValueError("Ratios must sum to 1.0")
-
-    n = len(ratios)
-    if labels is None:
-        labels = [f"Split_{i+1}" for i in range(n)]
-    elif len(labels) != n:
-        raise ValueError("Length of labels must match number of ratios")
-    
-    # Shuffle indices
-    rng = np.random.default_rng(seed)
-    idx = rng.permutation(len(df))
-    
-    # Compute partition sizes
-    sizes = (np.array(ratios) * len(df)).astype(int)
-    
-    # Adjust last partition to cover rounding errors
-    sizes[-1] = len(df) - sizes[:-1].sum()
-    
-    # Assign partitions
-    df = df.copy()
-    df[split_column] = None
-    start = 0
-    for size, label in zip(sizes, labels):
-        end = start + size
-        df.loc[df.index.isin(idx[start:end]), split_column] = label
-        start = end
+    df['Data_Split'] = 'Other'
+    idx = np.random.permutation(np.arange(len(df)))
+    num_train_data, num_test_data, num_val_data = int(len(idx)*ratio[0]), int(len(idx)*ratio[1]), int(len(idx)*ratio[2])
+    train_idx, test_idx, val_idx = idx[:num_train_data], idx[num_train_data:num_train_data+num_test_data], idx[num_train_data+num_test_data:]
+    df.loc[df.index.isin(train_idx), 'Data_Split'] = 'Tr'
+    df.loc[df.index.isin(test_idx), 'Data_Split'] = 'Te'
+    df.loc[df.index.isin(val_idx), 'Data_Split'] = 'Val'
     
     return df
-
-
-
-# def data_split_random_df(df, ratio=(0.5, 0.3, 0.2)):
-    
-#     df['Data_Split'] = 'Other'
-#     idx = np.random.permutation(np.arange(len(df)))
-#     num_train_data, num_test_data, num_val_data = int(len(idx)*ratio[0]), int(len(idx)*ratio[1]), int(len(idx)*ratio[2])
-#     train_idx, test_idx, val_idx = idx[:num_train_data], idx[num_train_data:num_train_data+num_test_data], idx[num_train_data+num_test_data:]
-#     df.loc[df.index.isin(train_idx), 'Data_Split'] = 'Tr'
-#     df.loc[df.index.isin(test_idx), 'Data_Split'] = 'Te'
-#     df.loc[df.index.isin(val_idx), 'Data_Split'] = 'Val'
-    
-#     return df
 
 
 def selective_range_data_sampling(df, ticks: list, column='logp', frac=0.7, random_state=1):
@@ -866,7 +557,7 @@ def selective_range_data_sampling(df, ticks: list, column='logp', frac=0.7, rand
     return mod_df, summary_df
     
     
-def selective_range_data_split(df, ticks, column='logp', ratio=(0.5, 0.3, 0.2), random_state=1, col_loc=2):
+def selective_range_data_split(df, ticks, column='logp', ratio=(0.5, 0.3, 0.2), random_state=1):
     
     """
     Splits the data into train, val, and test sets from defined value ranges in a specified column.
@@ -915,76 +606,13 @@ def selective_range_data_split(df, ticks, column='logp', ratio=(0.5, 0.3, 0.2), 
     test_idx_all += list(test)
     
     if 'Data_Split' not in df.columns:
-        df.insert(col_loc, 'Data_Split', ['Other']*len(df))
+        df.insert(2, 'Data_Split', ['Other']*len(df))
     
     df.loc[df.index.isin(train_idx_all), 'Data_Split'] = 'Tr'
     df.loc[df.index.isin(test_idx_all), 'Data_Split'] = 'Te'
     df.loc[df.index.isin(val_idx_all), 'Data_Split'] = 'Val'
 
     return df
-
-
-def classify_columns(df: pd.DataFrame, cat_threshold: int = 20) -> pd.Series:
-    """
-    Classifies columns in a DataFrame as 'numeric', 'categorical', or 'non-numeric'.
-
-    Heuristic:
-        - Integer columns with few unique values are classified as 'categorical'.
-        - Float or high-cardinality numeric columns are classified as 'numeric'.
-        - Object or string columns with low unique values are 'categorical', else 'non-numeric'.
-
-    Args:
-        df (pd.DataFrame): The input DataFrame.
-        cat_threshold (int): Maximum number of unique values to consider a column categorical.
-
-    Returns:
-        pd.Series: A mapping of column names to their inferred types.
-    """
-    col_types = {}
-
-    for col in df.columns:
-        series = df[col]
-        unique_vals = series.nunique(dropna=True)
-
-        if series.isnull().all():
-            col_types[col] = 'unknown'  # or 'non-informative'
-            continue
-
-        if pd.api.types.is_numeric_dtype(series):
-            if unique_vals <= cat_threshold:
-                col_types[col] = 'categorical'
-            else:
-                col_types[col] = 'numeric'
-        elif pd.api.types.is_bool_dtype(series):
-            col_types[col] = 'categorical'
-        elif pd.api.types.is_datetime64_any_dtype(series):
-            col_types[col] = 'datetime'
-        elif unique_vals <= cat_threshold:
-            col_types[col] = 'categorical'
-        else:
-            col_types[col] = 'non-numeric'
-
-    return pd.Series(col_types, name='inferred_type')
-
-
-# Given a set of strings and a set of characters it will return all the strings that doesn't contains the characters.
-def exclude_strings(all_strings = [], exclude_char_list = []):
-    
-    '''
-    Input:
-        - all_strings : All the strings in a list format
-        - exclude_char_list : List of characters.
-    Output:
-        - all_strings : List of strings.
-        
-        - **Those strings contains one of the characters from <exclude_char_list> will be eleminated from the list.
-    '''
-
-    for ex in exclude_char_list:
-        all_strings = [string for string in all_strings if ex not in string]
-    all_strings = list(set(all_strings))
-
-    return all_strings
 
 def str2chars(string: str) -> set:
     
@@ -1195,121 +823,6 @@ def KMeans_fit_predict(matrix, n_clusters=5):
         clusters_dict[i] = matrix[labels == i]
 
     return clusters_dict, labels
-
-
-def apply_reductions(df: pd.DataFrame, value_col: str, use_lda: bool = False) -> Dict[str, np.ndarray]:
-    """
-    Apply multiple dimensionality reduction techniques (2D projection).
-
-    Args:
-        df (pd.DataFrame): Input dataframe with features + value column.
-        value_col (str): Column used for coloring (can be discrete or continuous).
-        use_lda (bool): Whether to include LDA (requires discrete labels).
-
-    Returns:
-        Dict[str, np.ndarray]: Dictionary with method names as keys and 2D projections as values.
-        np.ndarray: Values of the coloring column.
-    """
-    X = df.drop(columns=[value_col]).values
-    values = df[value_col].values
-
-    reducers = {
-        "UMAP": UMAP(n_components=2, random_state=42),
-        "PCA": PCA(n_components=2, random_state=42),
-        "Isomap": Isomap(n_components=2),
-        "FactorAnalysis": FactorAnalysis(n_components=2, random_state=42),
-        "MDS": MDS(n_components=2, random_state=42, n_init=1, max_iter=300),
-        "t-SNE": TSNE(n_components=2, random_state=42, init="pca"),
-        "TruncatedSVD": TruncatedSVD(n_components=2, random_state=42),
-        "KernelPCA": KernelPCA(n_components=2, kernel="rbf", random_state=42),
-    }
-    
-    if use_lda:
-        try:
-            reducers["LDA"] = LDA(n_components=2)
-        except Exception as e:
-            print("⚠️ LDA skipped:", e)
-
-    results = {}
-    for name, reducer in reducers.items():
-        try:
-            if name == "LDA":
-                results[name] = reducer.fit_transform(X, values)
-            else:
-                results[name] = reducer.fit_transform(X)
-        except Exception as e:
-            print(f"⚠️ {name} failed: {e}")
-
-    return results, values
-
-
-def plot_reductions(results: dict, values: np.ndarray,
-                    ncols: int = 3, figsize=(16, 12), cmap="viridis", cbar_name = 'Value'):
-    """
-    Plot 2D projections from multiple dimensionality reduction methods
-    with consistent style and non-overlapping colorbars/legends.
-
-    Args:
-        results (dict): {method_name: projection_array (n_samples, 2)}.
-        values (array-like): Column values (discrete or continuous).
-        ncols (int): Number of subplot columns.
-        figsize (tuple): Figure size.
-        cmap (str): Colormap for continuous values.
-    """
-    sns.set_style("whitegrid")
-
-    # Detect discrete vs continuous values
-    values = np.array(values)
-    is_discrete = (pd.Series(values).dtype == "object" or
-                   pd.api.types.is_categorical_dtype(values) or
-                   len(np.unique(values)) < 15)
-
-    n_methods = len(results)
-    nrows = int(np.ceil(n_methods / ncols))
-
-    fig, axes = plt.subplots(nrows, ncols, figsize=figsize,
-                             constrained_layout=True)
-    axes = axes.flatten()
-
-    if is_discrete:
-        unique_vals = np.unique(values)
-        palette = sns.color_palette("tab10", len(unique_vals))
-        lut = dict(zip(unique_vals, palette))
-        colors = pd.Series(values).map(lut)
-
-        for ax, (name, proj) in zip(axes, results.items()):
-            ax.scatter(proj[:, 0], proj[:, 1], c=colors, s=20, alpha=0.8)
-            ax.set_title(name, fontsize=12, fontweight="bold")
-            ax.set_xticks([]); ax.set_yticks([])
-
-        # Legend below all plots
-        handles = [plt.Line2D([0], [0], marker='o', color='w',
-                              markerfacecolor=lut[val], label=str(val), markersize=6)
-                   for val in unique_vals]
-        fig.legend(handles=handles, loc="lower center",
-                   ncol=min(len(unique_vals), 6), frameon=False, fontsize=12)
-
-    else:  # Continuous case
-        norm = plt.Normalize(vmin=np.min(values), vmax=np.max(values))
-        sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-        sm.set_array([])
-
-        for ax, (name, proj) in zip(axes, results.items()):
-            sc = ax.scatter(proj[:, 0], proj[:, 1],
-                            c=values, cmap=cmap, s=20, alpha=0.8, norm=norm)
-            ax.set_title(name, fontsize=12, fontweight="bold")
-            ax.set_xticks([]); ax.set_yticks([])
-
-        # Shared colorbar on the right
-        cbar = fig.colorbar(sm, ax=axes, fraction=0.02, pad=0.02)
-        cbar.set_label(cbar_name, fontsize=11)
-
-    # Hide unused axes if any
-    for ax in axes[n_methods:]:
-        ax.axis("off")
-
-    plt.show()
-
 
 
 def plot_3d(
@@ -1585,6 +1098,189 @@ def convex_inv_PCA(PCA_model, X, Y, no_of_points = 1000, type_ = 'numpy', space 
     inv_pca_z = PCA_model.inverse_transform(z)
 
     return inv_pca_z
+
+
+def execution_time(func, *args):
+
+    tic = time.time()
+    func_value = func(*args)#Calculate function value
+    toc = time.time()
+
+    return (toc - tic), func_value
+
+
+
+def save_dict_csv_pandas(dict_name, save_filename='temp_save_filename.csv'):
+
+    # create folder (if not) 
+    _ = create_folder(save_filename[:-len(save_filename.split('/')[-1])])
+    pd.DataFrame.from_dict(dict_name).to_csv(save_filename, index=False)
+
+
+
+def save_dict_pickle(dict_name, save_filename='temp_save_filename.pkl', protocol=4):
+
+    # create folder (if not) 
+    _ = create_folder(save_filename[:-len(save_filename.split('/')[-1])])
+    with open(save_filename,'wb') as f:
+        pickle.dump(dict_name, f, protocol=protocol)
+
+
+
+def load_dict_pickle(input_filename):
+    
+    with open(input_filename,'rb') as f:
+        dict_name = pickle.load(f)
+
+    return dict_name
+
+
+
+def line_count_csv_file(filename, chunksize=1000):
+
+    print('Counting number of data point in: "{}"' .format(filename))
+    count = 0
+    for chunk in tqdm(pd.read_csv(filename, usecols=[0], chunksize=chunksize)):
+        count += len(chunk)
+
+    return count
+
+
+# Given a set of strings and a set of characters it will return all the strings that doesn't contains the characters.
+def exclude_strings(all_strings = [], exclude_char_list = []):
+    
+    '''
+    Input:
+        - all_strings : All the strings in a list format
+        - exclude_char_list : List of characters.
+    Output:
+        - all_strings : List of strings.
+        
+        - **Those strings contains one of the characters from <exclude_char_list> will be eleminated from the list.
+    '''
+
+    for ex in exclude_char_list:
+        all_strings = [string for string in all_strings if ex not in string]
+    all_strings = list(set(all_strings))
+
+    return all_strings
+
+
+
+def read_csv2list(file_path):
+    
+    '''
+    - Reads a .csv file in the given filepath and returns it in a list format.
+    '''
+
+    with open(file_path, mode ='r')as file:
+        csv_reader = csv.reader(file)
+
+        headers = next(csv_reader)
+        rows = []
+        # displaying the contents of the CSV file
+        for line in csv_reader:
+            rows.append(line)
+
+    return rows, headers
+
+
+
+def read_csv2array(file_path):
+
+    file_ = pd.read_csv(file_path)
+    file_ = np.array(file_)
+
+    return file_
+
+
+def read_csv2dict(file_path):
+
+    read_dict = {}
+
+    with open(file_path, newline='') as csvfile:
+        reader = csv.DictReader(csvfile)
+        headers = reader.fieldnames
+        i=0
+        for row in reader:
+            read_dict[i] = row
+            i+=1
+
+    return read_dict, headers
+
+
+
+def write_csv_columnwise(file_path, file_name, headers = [], column_list = []):
+    
+    '''
+    - headers : This must be the list of strings of the filednames.
+    - column_list : This must be list of lists. First element of column_list should be the first column of the csv file.
+       
+    - **csv file will contain number of rows = min of column lengths of the given column list.
+    '''
+
+    if len(headers) == len(column_list):
+
+        save_path = create_file(file_path, file_name)
+
+        min_len = sorted(len(column_list[i]) for i in range(len(column_list)))[0]
+        dicts = {}
+        
+        with open(save_path, mode ='w') as file:
+            writer = csv.DictWriter(file, fieldnames=headers)
+            writer.writeheader()
+            
+            for j in range(min_len):
+                for i in range(len(column_list)):
+                    dicts[headers[i]] = column_list[i][j]
+
+                writer.writerow(dicts)
+
+    else:
+        raise AttributeError(f'header length = {len(headers)} not equal length of column list = {len(column_list)}')
+    
+    file_ = pd.read_csv(save_path)
+    return file_
+
+
+
+def write_csv_rowwise(file_path, file_name, rows: list, headers = []):
+
+
+    '''
+    - rows: This must be list of lists. For example: first element of rows should be the first row of the csv file.
+    - headers: This must be the list of strings of the filednames.
+    '''
+
+    file_path = create_file(file_path, file_name)
+
+    with open(file_path, 'w') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(headers)
+        
+        for row in rows:
+            writer.writerow(row)
+
+    file = pd.read_csv(file_path)
+
+    return file
+
+
+
+def writer_dict_csv(*dicts, headers, file_path, file_name):
+
+    file_path = create_file(file_path, file_name)
+
+    with open(file_path, 'w') as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=headers)
+        writer.writeheader()
+
+        for d in dicts:
+            writer.writerow(d)
+
+    file = pd.read_csv(file_path)
+
+    return file
 
 
 def euc_dist(X, Y, metric = 'euclidean'):
@@ -2319,17 +2015,8 @@ def data_stat(data_list: List[float]) -> Tuple[float, float, float, float, float
     counts, bins = np.histogram(data, bins=30)
     mode_value = bins[np.argmax(counts)]
     
+    
     return min_value, max_value, mean_value, median_value, mode_value, std_value
-
-def find_outliers_iqr(df, column):
-    
-    Q1 = df[column].quantile(0.25)
-    Q3 = df[column].quantile(0.75)
-    IQR = Q3 - Q1
-    lower = Q1 - 1.5 * IQR
-    upper = Q3 + 1.5 * IQR
-    
-    return df[(df[column] < lower) | (df[column] > upper)]
 
 
 def plot_distribution_compair(data_list1: List[np.ndarray | list],
@@ -2413,77 +2100,48 @@ def plot_distribution_compair(data_list1: List[np.ndarray | list],
         plt.show()
         
         
-def plot_multiple_distribution(data_list1, n_cols=0, figsize=None, subplot_title=None,
-                    suptitle="Density", ax1_label="Property", subplot_type='Dataset',
-                    ax_label_fontsize=12, bins=30, alpha=0.6, kde=True,
-                    x_lims=None, savepath=None) -> None:
+def plot_multiple_distribution(data_list1: List[np.ndarray | list],
+                              subplot_title: List[str],
+                              alpha: float = 0.4,
+                              figsize: tuple = (12, 12),
+                              suptitle: str = 'Suptitle',
+                              savepath: str = '',
+                              x_lims: tuple | None = None,
+                              ax1_label: str = 'Train Data',
+                              ax_label_fontsize: int = 10
+                              ) -> None:
 
-    if not n_cols:
-        n_cols = int(np.sqrt(len(data_list1)))
-    # --- Figure size ---
-    n_datasets = len(data_list1)
-    rows = int(np.ceil(n_datasets / n_cols))
-    cols = n_cols
-    if figsize is None:
-        figsize = (6 * cols, 4 * rows)
+    fig, axes = plt.subplots(len(data_list1), 1, figsize=figsize)
+    
+    # # Convert axes to 2D array format if len(data_list1) is 1
+    if len(data_list1) == 1:
+        axes = np.array([axes])
 
-    fig, axes = plt.subplots(rows, cols, figsize=figsize, squeeze=False)
-
-    # --- Titles handling ---
-    if subplot_title is None:
-        subplot_title = [''] * n_datasets
-    else:
-        assert len(data_list1) == len(subplot_title), "Titles must match number of datasets."
-
-    plt.suptitle(suptitle, fontsize=ax_label_fontsize + 10, fontweight='bold')
-
-    # --- Global x-limits ---
-    if x_lims:
-            min_x, max_x = x_lims[0], x_lims[1]
-    else:
-        # Determine the x-limits for both data_list1 and data_list2
-        min_x = min(min(data_list1[0]), min(data_list1[0]))
-        max_x = max(max(data_list1[0]), max(data_list1[0]))
+    for i, data in enumerate(data_list1):
         
-        # Determine the x-limits for both data_list1 and data_list1
-        mean_min_x = max(np.array(data_list1[0]).mean(), np.array(data_list1[0]).mean())
-        mean_max_x = max(np.array(data_list1[0]).mean(), np.array(data_list1[0]).mean())
+        min_value1, max_value1, mean_value1, median_value1, mode_value1, _ = data_stat(data_list1[i])
         
-        min_x = min_x+mean_min_x if mean_min_x<0 else min_x-mean_min_x
-        max_x = max_x+mean_max_x if mean_max_x>0 else max_x-mean_max_x
+        # KDE plot (on the left column for train data)
+        sns.kdeplot(data, ax=axes[i], alpha=alpha, color='orange', fill=True)
+        axes[i].set_title(f'{ax1_label}: {subplot_title[i]}\n', fontsize=ax_label_fontsize+5)
+        axes[i].set_xlabel(f'{subplot_title[i]}\n', fontsize=ax_label_fontsize)
+        axes[i].set_ylabel('Density', fontsize=ax_label_fontsize)
+        
+        axes[i].axvline(mean_value1, color='r', linestyle='-.', label=f'Mean: {mean_value1:.2f}')
+        axes[i].axvline(median_value1, color='g', linestyle='-.', label=f'Median: {median_value1:.2f}')
+        axes[i].axvline(mode_value1, color='b', linestyle='-.', label=f'Mode: {mode_value1:.2f}')
+        axes[i].axvline(min_value1, color='cyan', linestyle='-.', label=f'Min: {min_value1:.2f}')
+        axes[i].axvline(max_value1, color='violet', linestyle='-.', label=f'Max: {max_value1:.2f}')
+        axes[i].legend(fontsize=ax_label_fontsize)
+        axes[i].grid()
 
-    # --- Loop over datasets ---
-    for idx, data in enumerate(data_list1):
-        r, c = divmod(idx, n_cols)
-        ax = axes[r, c]
+    plt.suptitle(suptitle, fontsize=ax_label_fontsize+10, fontweight='bold')
 
-        # Compute stats (replace with your function)
-        min_value1, max_value1, mean_value1, median_value1, mode_value1, _ = data_stat(data)
-        sns.kdeplot(data, ax=ax, color='green', linewidth=1, fill=True, edgecolor="black", alpha=0.4)
-
-        ax.set_title(f'{subplot_type}: {subplot_title[idx]}', fontsize=ax_label_fontsize + 3)
-        ax.set_xlabel(ax1_label, fontsize=ax_label_fontsize)
-        ax.set_ylabel('Density', fontsize=ax_label_fontsize)
-
-        # Vertical lines
-        ax.axvline(mean_value1, color='r', linestyle='-.', label=f'Mean: {mean_value1:.2f}')
-        ax.axvline(median_value1, color='g', linestyle='-.', label=f'Median: {median_value1:.2f}')
-        ax.axvline(mode_value1, color='b', linestyle='-.', label=f'Mode: {mode_value1:.2f}')
-        ax.axvline(min_value1, color='cyan', linestyle='-.', label=f'Min: {min_value1:.2f}')
-        ax.axvline(max_value1, color='purple', linestyle='-.', label=f'Max: {max_value1:.2f}')
-
-        ax.legend(loc='upper right', fontsize=ax_label_fontsize-1)
-        ax.grid()
-        ax.set_xlim(min_x, max_x)
-
-    # --- Remove empty axes ---
-    for idx in range(n_datasets, rows * cols):
-        r, c = divmod(idx, n_cols)
-        fig.delaxes(axes[r, c])
-
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    # Adjust layout to prevent overlapping
+    plt.tight_layout()
+    
     if savepath:
-        plt.savefig(savepath, dpi=300, bbox_inches="tight")
+        plt.savefig(savepath,  dpi=100)
         plt.close()
     else:
         plt.show()
@@ -2501,8 +2159,7 @@ def plot_hist_compair(data_list1: List[np.ndarray | list],
                       ax1_label: str = 'Train Data',
                       ax2_label: str = 'Independent Data',
                       x_lims: tuple | None = None,
-                      ax_label_fontsize: int = 10,
-                      kde=False
+                      ax_label_fontsize: int = 10
                       ):
 
     fig, axes = plt.subplots(len(data_list1), 2, figsize=figsize)
@@ -2546,8 +2203,6 @@ def plot_hist_compair(data_list1: List[np.ndarray | list],
         axes[i, 0].axvline(max_value1, color='violet', linestyle='-.', label=f'Max: {max_value1:.2f}')
         axes[i, 0].legend(loc='upper right', fontsize=ax_label_fontsize)  # Add legend to bar plot
         axes[i, 0].grid()
-        if kde:
-            sns.kdeplot(data_list1[i], ax=axes[i, 0], color='red', linewidth=1, alpha=alpha)
 
         # Bar plot (on the left column)
         axes[i, 1].hist(data_list2[i], bins=bins, alpha=alpha, color='orange', edgecolor='black')
@@ -2563,8 +2218,6 @@ def plot_hist_compair(data_list1: List[np.ndarray | list],
         axes[i, 1].axvline(max_value2, color='violet', linestyle='-.', label=f'Max: {max_value2:.2f}')
         axes[i, 1].legend(loc='upper right', fontsize=ax_label_fontsize)
         axes[i, 1].grid()
-        if kde:
-            sns.kdeplot(data_list2[i], ax=axes[i, 1], color='red', linewidth=1, alpha=alpha)
 
 
     # Adjust layout to prevent overlapping
@@ -2577,161 +2230,61 @@ def plot_hist_compair(data_list1: List[np.ndarray | list],
         plt.show()
         
         
-# def plot_multiple_hist(
-#     data_list1: List[np.ndarray | list],
-#     subplot_title: List[str] = None,
-#     bins: int|list = 30,
-#     alpha: float = 0.4,
-#     figsize: tuple = (),
-#     suptitle: str = 'Suptitle',
-#     savepath: str = '',
-#     kde: bool = True,
-#     ax1_label: str = 'Train Data',
-#     ax_label_fontsize: int = 10,
-#     x_lims=None
-# ):
-#     # Figure size handling
-#     if not figsize:
-#         figsize = (6, 4 * len(data_list1))
-
-#     # Default subplot titles
-#     if not subplot_title:
-#         subplot_title = [''] * len(data_list1)
-#     else:
-#         assert len(data_list1) == len(subplot_title), "Titles must match number of datasets."
-
-#     fig, axes = plt.subplots(len(data_list1), 1, figsize=figsize)
-#     axes = np.atleast_1d(axes)  # Ensure iterable axes
-
-#     plt.suptitle(suptitle, fontsize=ax_label_fontsize + 10, fontweight='bold')
-
-#     for i, data in enumerate(data_list1):
-#         # Get statistics (replace with your own function)
-#         min_value1, max_value1, mean_value1, median_value1, mode_value1, _ = data_stat(data)
-        
-#         if x_lims:
-#             min_x, max_x = x_lims[0], x_lims[1]
-            
-#         else:
-#             # Determine the x-limits for both data_list1 and data_list2
-#             min_x = min(min(data_list1[0]), min(data_list1[0]))
-#             max_x = max(max(data_list1[0]), max(data_list1[0]))
-            
-#             # Determine the x-limits for both data_list1 and data_list1
-#             mean_min_x = max(np.array(data_list1[0]).mean(), np.array(data_list1[0]).mean())
-#             mean_max_x = max(np.array(data_list1[0]).mean(), np.array(data_list1[0]).mean())
-            
-#             min_x = min_x+mean_min_x if mean_min_x<0 else min_x-mean_min_x
-#             max_x = max_x+mean_max_x if mean_max_x>0 else max_x-mean_max_x
-
-#         # Histogram on correct axis
-#         sns.histplot(data, ax=axes[i], color='green', bins=bins, stat="density",
-#                      edgecolor='black', linewidth=1, alpha=alpha)
-#         if kde:
-#             sns.kdeplot(data, ax=axes[i], color='red', linewidth=1)
-
-#         axes[i].set_title(f'{ax1_label}: {subplot_title[i]}', fontsize=ax_label_fontsize + 5)
-#         axes[i].set_xlabel(subplot_title[i], fontsize=ax_label_fontsize)
-#         axes[i].set_ylabel('Frequency', fontsize=ax_label_fontsize)
-
-#         # Add vertical lines
-#         axes[i].axvline(mean_value1, color='r', linestyle='-.', label=f'Mean: {mean_value1:.2f}')
-#         axes[i].axvline(median_value1, color='g', linestyle='-.', label=f'Median: {median_value1:.2f}')
-#         axes[i].axvline(mode_value1, color='b', linestyle='-.', label=f'Mode: {mode_value1:.2f}')
-#         axes[i].axvline(min_value1, color='cyan', linestyle='-.', label=f'Min: {min_value1:.2f}')
-#         axes[i].axvline(max_value1, color='purple', linestyle='-.', label=f'Max: {max_value1:.2f}')
-
-#         axes[i].legend(loc='upper right', fontsize=ax_label_fontsize)
-#         axes[i].grid()
-#         axes[i].set_xlim(min_x, max_x)  # Set x-limits to the calculated min and max
-
-#     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-
-#     if savepath:
-#         plt.savefig(savepath, dpi=100)
-#         plt.close()
-#     else:
-#         plt.show()
-
-
-def plot_multiple_hist(data_list1, n_cols=0, figsize=None, subplot_title=None,
-                    suptitle="Histograms", ax1_label="Property", subplot_type='Dataset',
-                    ax_label_fontsize=12, bins=30, alpha=0.6, kde=True,
-                    x_lims=None, savepath=None):
+def plot_multiple_hist(data_list1: List[np.ndarray | list],
+                      subplot_title: List[str] = None,
+                      bins: int = 30,
+                      alpha: float = 0.4,
+                      figsize: tuple = (),
+                      suptitle: str = 'Suptitle',
+                      savepath: str = '',
+                      kde: bool = True,
+                      ax1_label: str = 'Train Data',
+                      ax_label_fontsize: int = 10
+                      ):
+    if not figsize:
+        figsize = (4*(len(data_list1)+1), 6*(len(data_list1)))
+    if not subplot_title:
+        subplot_title = ['']*len(data_list1)
+    else:
+        assert len(data_list1) == len(subplot_title)
+    fig, axes = plt.subplots(len(data_list1), 1, figsize=figsize)
     
-    if not n_cols:
-        n_cols = int(np.sqrt(len(data_list1)))
-    # --- Figure size ---
-    n_datasets = len(data_list1)
-    rows = int(np.ceil(n_datasets / n_cols))
-    cols = n_cols
-    if figsize is None:
-        figsize = (6 * cols, 4 * rows)
+    
+    # # Convert axes to 2D array format if len(data_list1) is 1
+    if len(data_list1) == 1:
+        axes = np.array([axes])
 
-    fig, axes = plt.subplots(rows, cols, figsize=figsize, squeeze=False)
-
-    # --- Titles handling ---
-    if subplot_title is None:
-        subplot_title = [''] * n_datasets
-    else:
-        assert len(data_list1) == len(subplot_title), "Titles must match number of datasets."
-
-    plt.suptitle(suptitle, fontsize=ax_label_fontsize + 10, fontweight='bold')
-
-    # --- Global x-limits ---
-    if x_lims:
-            min_x, max_x = x_lims[0], x_lims[1]
-    else:
-        # Determine the x-limits for both data_list1 and data_list2
-        min_x = min(min(data_list1[0]), min(data_list1[0]))
-        max_x = max(max(data_list1[0]), max(data_list1[0]))
+    plt.suptitle(suptitle, fontsize=ax_label_fontsize+10, fontweight='bold')
+    for i, data in enumerate(data_list1):
         
-        # Determine the x-limits for both data_list1 and data_list1
-        mean_min_x = max(np.array(data_list1[0]).mean(), np.array(data_list1[0]).mean())
-        mean_max_x = max(np.array(data_list1[0]).mean(), np.array(data_list1[0]).mean())
+        min_value1, max_value1, mean_value1, median_value1, mode_value1, _ = data_stat(data_list1[i])
         
-        min_x = min_x+mean_min_x if mean_min_x<0 else min_x-mean_min_x
-        max_x = max_x+mean_max_x if mean_max_x>0 else max_x-mean_max_x
-
-    # --- Loop over datasets ---
-    for idx, data in enumerate(data_list1):
-        r, c = divmod(idx, n_cols)
-        ax = axes[r, c]
-
-        # Compute stats (replace with your function)
-        min_value1, max_value1, mean_value1, median_value1, mode_value1, _ = data_stat(data)
-
-        sns.histplot(data, ax=ax, color='green', bins=bins, stat="density",
-                     edgecolor='black', linewidth=1, alpha=alpha)
+        # Bar plot (on the left column)
+        sns.histplot(data_list1[i], color='orange', bins=bins, stat="density", edgecolor='black', linewidth = 1, alpha=alpha)
         if kde:
-            sns.kdeplot(data, ax=ax, color='red', linewidth=1)
+            sns.kdeplot(data_list1[i], color='red', linewidth=1)
+        # axes[i].hist(data_list1[i], bins=bins, alpha=alpha, color='orange', edgecolor='black')
+        axes[i].set_title(f'{ax1_label}: {subplot_title[i]}\n', fontsize=ax_label_fontsize+5)
+        axes[i].set_xlabel(f'{subplot_title[i]}\n', fontsize=ax_label_fontsize)
+        axes[i].set_ylabel('Frequency', fontsize=ax_label_fontsize)
+        
+        axes[i].axvline(mean_value1, color='r', linestyle='-.', label=f'Mean: {mean_value1:.2f}')
+        axes[i].axvline(median_value1, color='g', linestyle='-.', label=f'Median: {median_value1:.2f}')
+        axes[i].axvline(mode_value1, color='b', linestyle='-.', label=f'Mode: {mode_value1:.2f}')
+        axes[i].axvline(min_value1, color='cyan', linestyle='-.', label=f'Min: {min_value1:.2f}')
+        axes[i].axvline(max_value1, color='purple', linestyle='-.', label=f'Max: {max_value1:.2f}')
+        axes[i].legend(loc='upper right', fontsize=ax_label_fontsize)  # Add legend to bar plot
+        axes[i].grid()
 
-        ax.set_title(f'{subplot_type}: {subplot_title[idx]}', fontsize=ax_label_fontsize + 3)
-        ax.set_xlabel(ax1_label, fontsize=ax_label_fontsize)
-        ax.set_ylabel('Density', fontsize=ax_label_fontsize)
-
-        # Vertical lines
-        ax.axvline(mean_value1, color='r', linestyle='-.', label=f'Mean: {mean_value1:.2f}')
-        ax.axvline(median_value1, color='g', linestyle='-.', label=f'Median: {median_value1:.2f}')
-        ax.axvline(mode_value1, color='b', linestyle='-.', label=f'Mode: {mode_value1:.2f}')
-        ax.axvline(min_value1, color='cyan', linestyle='-.', label=f'Min: {min_value1:.2f}')
-        ax.axvline(max_value1, color='purple', linestyle='-.', label=f'Max: {max_value1:.2f}')
-
-        ax.legend(loc='upper right', fontsize=ax_label_fontsize-1)
-        ax.grid()
-        ax.set_xlim(min_x, max_x)
-
-    # --- Remove empty axes ---
-    for idx in range(n_datasets, rows * cols):
-        r, c = divmod(idx, n_cols)
-        fig.delaxes(axes[r, c])
-
+    # Adjust layout to prevent overlapping
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+
     if savepath:
-        plt.savefig(savepath, dpi=300, bbox_inches="tight")
+        plt.savefig(savepath,  dpi=100)
         plt.close()
     else:
         plt.show()
+    
     
     
 def dist_hist_comparison(data_list1: List[np.ndarray | list],
@@ -2827,7 +2380,7 @@ def percentage_within_fold_change(y_true, y_pred, fold=2):
     
     # Calculate fold change
     fold_change = y_pred / y_true 
-    max_, min_ = np.round(max(fold_change), 2), np.round(min(fold_change), 2)
+    max_, min_ = round(max(fold_change), 2), round(min(fold_change), 2)
     within_fold = (1/fold <= fold_change) & (fold_change <= fold)
     
     # Calculate the percentage
@@ -3196,302 +2749,3 @@ class ClassificationResultAnalyzer:
         #     plt.close()
         # else:
         #     plt.show()
-
-
-class TrendAnalyser:
-    
-    try:
-        from scipy.signal import find_peaks
-        from scipy.stats import kendalltau, spearmanr, pearsonr
-        _HAS_SCIPY = True
-    except Exception:
-        _HAS_SCIPY = False
-    
-    def __init__(self, x, y, threshold=0.75, alpha=0.05):
-        self.x, self.y = self._safe_sort_xy(x, y)
-        self.threshold = threshold
-        self.alpha = alpha
-
-    # ---------- helpers ----------
-    def _safe_sort_xy(self, x, y):
-        x = np.asarray(x, dtype=float)
-        y = np.asarray(y, dtype=float)
-        if x.shape != y.shape:
-            raise ValueError("x and y must have the same shape.")
-        idx = np.argsort(x)
-        x, y = x[idx], y[idx]
-        mask = np.isfinite(x) & np.isfinite(y)
-        x, y = x[mask], y[mask]
-        keep = np.r_[True, np.diff(x) != 0]
-        return x[keep], y[keep]
-
-    def _monotonicity(self):
-        dx = np.diff(self.x)
-        dy = np.diff(self.y)
-        deriv = dy / dx
-        total = len(deriv)
-        if total == 0:
-            return 0.0, 0.0, "insufficient"
-        inc_r = np.sum(deriv > 0) / total
-        dec_r = np.sum(deriv < 0) / total
-        if inc_r >= self.threshold:
-            decision = f"increasing (~{inc_r:.1%})"
-        elif dec_r >= self.threshold:
-            decision = f"decreasing (~{dec_r:.1%})"
-        else:
-            decision = f"None (↑{inc_r:.1%}, ↓{dec_r:.1%})"
-        return inc_r, dec_r, decision
-
-    def _global(self):
-        if len(self.y) < 2:
-            return 0.0, "insufficient"
-        delta = self.y[-1] - self.y[0]
-        if delta > 0:
-            return delta, "up"
-        elif delta < 0:
-            return delta, "down"
-        return delta, "flat"
-
-    def _regression(self):
-        if len(self.x) < 2:
-            return np.nan, "insufficient"
-        slope, intercept = np.polyfit(self.x, self.y, 1)
-        if slope > 0:
-            return slope, "up"
-        elif slope < 0:
-            return slope, "down"
-        return slope, "flat"
-
-    def _peaks_troughs(self):
-        y = np.asarray(self.y, dtype=float)
-        if len(y) < 3:
-            return np.array([]), np.array([])
-        if TrendAnalyser._HAS_SCIPY:
-            peaks, _ = TrendAnalyser.find_peaks(y)
-            troughs, _ = TrendAnalyser.find_peaks(-y)
-        else:
-            dy1 = y[1:-1] - y[:-2]
-            dy2 = y[2:] - y[1:-1]
-            mids = np.arange(1, len(y) - 1)
-            peaks = mids[(dy1 > 0) & (dy2 < 0)]
-            troughs = mids[(dy1 < 0) & (dy2 > 0)]
-        return peaks, troughs
-
-    def _seq_trend(self, values):
-        if len(values) < 2:
-            return "None", 0.0, 0.0
-        diffs = np.diff(values)
-        total = len(diffs)
-        up = np.sum(diffs > 0) / total
-        down = np.sum(diffs < 0) / total
-        no_change=np.sum(diffs == 0) / total
-        if down >= self.threshold:
-            return "down", up, down, total, no_change
-        elif up >= self.threshold:
-            return "up", up, down, total, no_change
-        return "None", up, down, total, no_change
-
-    # ---------- public API ----------
-    def analyse(self):
-        inc_r, dec_r, mono_decision = self._monotonicity()
-        delta, global_decision = self._global()
-        slope, reg_decision = self._regression()
-        p_idx, t_idx = self._peaks_troughs()
-        p_decision, p_up, p_down, p_pairs, p_no_change = self._seq_trend(self.y[p_idx])
-        t_decision, t_up, t_down, t_pairs, t_no_change = self._seq_trend(self.y[t_idx])
-
-        peaks_text = {"up": "Higher Highs", "down": "Lower Highs", "None": "Mixed Highs"}[p_decision]
-        troughs_text = {"up": "Higher Lows", "down": "Lower Lows", "None": "Mixed Lows"}[t_decision]
-        
-        # Pearson
-        pearson_corr, pearson_p = TrendAnalyser.pearsonr(self.x, self.y)
-        # Spearman
-        spearman_corr, spearman_p = TrendAnalyser.spearmanr(self.x, self.y)
-        # Kendall
-        kendall_corr, kendall_p = TrendAnalyser.kendalltau(self.x, self.y)
-
-        summary = (
-            f"{'-'*80}\n"
-            f"Local monotonicity: {mono_decision}; \n"
-            f"Global: {global_decision} (Δ={delta:.3g}); \n"
-            f"Regression: {reg_decision} (slope={slope:.3g}); \n"
-            f"Pearson Correlation: {f"r={pearson_corr:.3f}, p={pearson_p:.4f}, significance={pearson_p < self.alpha}"}\n"
-            f"Spearman Correlation: {f"r={spearman_corr:.3f}, p={spearman_p:.4f}, significance={spearman_p < self.alpha}"}\n"
-            f"Kendall Correlation: {f"r={kendall_corr:.3f}, p={kendall_p:.4f}, significance={kendall_p < self.alpha}"}\n"
-            f"Peaks: {peaks_text}\n"
-                + (f" (pairs={p_pairs}, ↑{p_up:.2%}, ↓{p_down:.2%}, ={p_no_change:2%})" if p_pairs else " (insufficient peaks)")
-                + "; "
-            f"\nTroughs: {troughs_text}\n"
-                + (f" (pairs={t_pairs}, ↑{t_up:.2%}, ↓{t_down:.2%}, ={t_no_change:2%})" if t_pairs else " (insufficient troughs)")
-                + "."
-            f"\n{'-'*80}\n"
-            )
-        print(summary)
-
-        return {
-            "monotonic": {
-                "increasing_ratio": inc_r,
-                "decreasing_ratio": dec_r,
-                "decision": mono_decision,
-            },
-            "global": {"decision": global_decision, "delta": delta},
-            "regression": {"slope": slope, "decision": reg_decision},
-            "peaks": {
-                "indices": p_idx,
-                "values": self.y[p_idx],
-                "decision": p_decision,
-                "up_ratio": p_up,
-                "down_ratio": p_down,
-            },
-            "troughs": {
-                "indices": t_idx,
-                "values": self.y[t_idx],
-                "decision": t_decision,
-                "up_ratio": t_up,
-                "down_ratio": t_down,
-            },
-            "pearson_corr":{
-                'r':pearson_corr,
-                'p':pearson_p,
-                'significance':pearson_p < self.alpha
-            },
-            "spearman_corr":{
-                'r':spearman_corr,
-                'p':spearman_p,
-                'significance':spearman_p < self.alpha
-            },
-            "kendall_corr":{
-                'r':kendall_corr,
-                'p':kendall_p,
-                'significance':kendall_p < self.alpha
-            }
-        }
-
-class RandomForestSHAPAnalyzer:
-    def __init__(self, model, X, y, smiles: Optional[List[str]] = None, scaler=None):
-        """
-        Initialize the analyzer.
-
-        Parameters
-        ----------
-        model : RandomForestClassifier or Regressor
-            The trained Random Forest model.
-        X : pd.DataFrame
-            Test/validation dataset.
-        y : pd.Series or np.ndarray
-            True labels/targets.
-        smiles : list[str], optional
-            List of SMILES strings for molecules (if chemical data).
-        scaler : fitted scaler, optional
-            If features were scaled, provide the scaler (i.e. mean and std) to recover original values.
-        """
-        self.model = model
-        self.X = X
-        self.y = np.array(y)
-        self.smiles = smiles
-        self.scaler = scaler
-
-        # Build explainer
-        self.explainer = shap.TreeExplainer(model)
-        self.shap_values = self.explainer.shap_values(X)
-        
-        # Handle classification (multi-class) vs regression
-        if isinstance(self.shap_values, list):
-            # For binary classification, shap_values[1] is usually most relevant
-            self.shap_values = self.shap_values[1]
-
-    # ------------------ Save & Load ------------------ #
-    def save(self, path_prefix: str = "./rf_shap"):
-        with open(f"{path_prefix}_explainer.pkl", "wb") as f:
-            pickle.dump(self.explainer, f)
-        with open(f"{path_prefix}_values.pkl", "wb") as f:
-            pickle.dump(self.shap_values, f)
-
-    def load(self, path_prefix: str = "./rf_shap"):
-        with open(f"{path_prefix}_explainer.pkl", "rb") as f:
-            self.explainer = pickle.load(f)
-        with open(f"{path_prefix}_values.pkl", "rb") as f:
-            self.shap_values = pickle.load(f)
-
-    # ------------------ Global Analysis ------------------ #
-    def summary_plot(self, features: Optional[List[str]] = None, top_n: int = 20):
-        """Global SHAP summary plot."""
-        if features:
-            X_filtered = self.X[features]
-            indices = [self.X.columns.tolist().index(f) for f in features]
-            shap_values_filtered = self.shap_values[:, indices]
-            shap.summary_plot(shap_values_filtered, X_filtered, feature_names=features)
-        else:
-            shap.summary_plot(self.shap_values, self.X, max_display=top_n)
-
-    def feature_importance(self):
-        """Return feature importance DataFrame sorted by abs SHAP."""
-        importance = np.mean(self.shap_values, axis=0)
-        importance_abs = np.mean(np.abs(self.shap_values), axis=0)
-        df = pd.DataFrame({
-            "Feature": self.X.columns,
-            "SHAP Importance": importance,
-            "SHAP Importance abs": importance_abs
-        }).sort_values("SHAP Importance abs", ascending=False)
-        return df
-
-    # ------------------ Local Analysis ------------------ #
-    def force_plot_instance(self, idx: int, features: Optional[List[str]] = None, top_n: int = 10):
-        """Force plot for a single instance."""
-        if self.scaler:
-            X_reversed = (self.scaler.mean_ + self.X.to_numpy() * np.sqrt(self.scaler.var_))
-        else:
-            X_reversed = self.X.to_numpy()
-
-        if features:
-            indices = [self.X.columns.tolist().index(f) for f in features]
-        else:
-            # Take top_n by absolute SHAP for this sample
-            indices = np.argsort(-np.abs(self.shap_values[idx]))[:top_n]
-
-        shap.force_plot(
-            base_value=float(self.explainer.expected_value),
-            shap_values=self.shap_values[idx, indices],
-            features=X_reversed[idx, indices],
-            feature_names=np.array(self.X.columns)[indices],
-            matplotlib=True,
-            show=True,
-            figsize=(15, 3),
-            link="identity",
-            text_rotation=90
-        )
-
-        # Print contextual info
-        if self.smiles:
-            print(f"SMILES: {self.smiles[idx]}")
-        print(f"True Value: {self.y[idx]}")
-        print(f"Predicted Value: {self.model.predict(self.X.iloc[idx:idx+1])[0]}")
-
-    # ------------------ Common Feature Analysis ------------------ #
-    def common_features(self, num_features: int = 200, ratio: float = 0.75, positive: bool = True):
-        """
-        Identify features consistently appearing in top/bottom SHAP rankings.
-
-        Parameters
-        ----------
-        num_features : int
-            Number of top/bottom features to consider per sample.
-        ratio : float
-            Minimum fraction of samples in which a feature must appear.
-        positive : bool
-            If True, consider top features (positive influence).
-            If False, consider bottom features (negative influence).
-        """
-        sorted_idx = np.argsort(self.shap_values, axis=1)[:, ::-1]
-        if not positive:
-            top_features = np.array(self.X.columns)[sorted_idx[:, -num_features:]]
-        else:
-            top_features = np.array(self.X.columns)[sorted_idx[:, :num_features]]
-
-        intersection = []
-        for col in self.X.columns:
-            count = sum(col in row for row in top_features)
-            if count >= ratio * len(top_features):
-                intersection.append(col)
-
-        return intersection

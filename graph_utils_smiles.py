@@ -3,10 +3,11 @@ import torch
 import torch.nn as nn
 import numpy as np
 import pandas as pd
-import pickle
+import pickle, gzip
 from torch.utils.data import Dataset
 from collections import Counter
 from tqdm import tqdm
+from multiprocessing import Pool, cpu_count
 
 from logP_values import *
 
@@ -18,13 +19,14 @@ from rdkit.Chem.Descriptors3D import (
     PMI1, PMI2, PMI3, RadiusOfGyration, SpherocityIndex
 )
 
-import sys
-sys.path.append('../../')
-from data_utils_smiles import selective_range_data_sampling
+import sys, os
+# sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../')))
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from Generalised_data_utils import selective_range_data_sampling
 
 __all__ = [
+    'extract_features_from_smiles',
     'list_smiles2symbols_hybridization_chiraltype',
-    'list_smiles2prop',
     'list_to_onehot',
     'get_element_properties',
     'get_atom_properties',
@@ -39,6 +41,7 @@ __all__ = [
     'Multirelational_GraphDataset',
     'Multirelational_GraphDataset_Embeddings',
     'SmilesDataset_graph_gen',
+    'limit_open_files',
     'GraphData_from_pickle',
     'GraphData_from_pickle_3d_descriptor',
     'feature_representation',
@@ -47,47 +50,93 @@ __all__ = [
     'separate_data',
     'weights_initilizer'
 ]
-## Molecules Representation
-def list_smiles2symbols_hybridization_chiraltype(smi_list):
+with open('/home/rkmvu/Dataset/Coca-2/Experimental_Data_P_app/train_test_partition_literature/All_possible_atoms_X.pkl', 'rb') as fp:
+    logP_dict = pickle.load(fp)
     
+def extract_features_from_smiles(smi):
+    """
+    Extracts features from a single SMILES string.
+    Returns: 
+        Tuple[List[str], List[str], List[str], List[str], int] -> (num_atoms, atom_syms, hybridizations, chiral_tags, bond_types, max_nbrs)
+    """
+    try:
+        mol = Chem.MolFromSmiles(smi)
+        num_atoms = mol.GetNumAtoms()
+        mol = Chem.AddHs(mol)
+
+        atom_syms = set()
+        hybridizations = set()
+        chiral_tags = set()
+        bond_types = set()
+        max_nbrs = 0
+
+        for atom in mol.GetAtoms():
+            atom_syms.add(atom.GetSymbol())
+            hybridizations.add(str(atom.GetHybridization()))
+            chiral_tags.add(str(atom.GetChiralTag()))
+
+            neighbors = [nbr.GetSymbol() for nbr in atom.GetNeighbors()]
+            bonds = [str(bond.GetBondType()) for bond in atom.GetBonds()]
+            bond_types |= set(bonds)
+            max_nbrs = max(max_nbrs, len(neighbors))
+
+        return num_atoms, atom_syms, hybridizations, chiral_tags, bond_types, max_nbrs
+    except:
+        pass
+
+
+def list_smiles2symbols_hybridization_chiraltype(smi_list, num_workers=cpu_count()-2):
+    
+    """
+    Parallel function to extract:
+    - max num atoms
+    - atom symbols
+    - hybridizations
+    - chiral types
+    - bond types
+    - max neighbors
+
+    Args:
+        smi_list (List[str]): List of SMILES strings.
+        num_workers (int): Number of parallel workers.
+
+    Returns:
+        Dict -> results
+    """
     all_hybridization = Chem.rdchem.HybridizationType.__dict__['names'].keys()
+    print('-'*80)
     print(f'All possible hybridizations are: {all_hybridization}')
     print(f'All possible chiraltypes are: {list(Chem.rdchem.ChiralType.__dict__['names'].keys())}')
-    hybridization_val = {'UNSPECIFIED', 'S'}
-    atom_symbols = set()
+    print('-'*80)
+    with Pool(num_workers) as pool:
+        results = list(pool.map(extract_features_from_smiles, smi_list))
+
+    atom_symbols = set(['Br', 'Cl', 'P', 'I', 'F', 'H', 'S', 'N', 'O', 'C'])
+    hybridizations = {'UNSPECIFIED', 'S'}  # Pre-set
     chiraltypes = set()
-    for smi in smi_list:
-        mol = Chem.MolFromSmiles(smi)
-        mol = Chem.AddHs(mol)
-        for atom in mol.GetAtoms():
-            hybridization_val = hybridization_val | {str(atom.GetHybridization())}
-            atom_symbols = atom_symbols | {str(atom.GetSymbol())}
-            chiraltypes = chiraltypes | {str(atom.GetChiralTag())}
-    
-    # list_hyb = [k for k, v in all_hybridization.items() if v in hybridization_val]    
-    atom_symbols = sorted(list(atom_symbols), key=len, reverse=True)
-    print(f'All atoms in the whole SMILES list are: {atom_symbols}')
-    print(f'All hybridizations in the whole SMILES list are: {hybridization_val}')
-    print(f'All chiraltypes in the whole SMILES list are: {chiraltypes}')
-    
-    return list(atom_symbols), list(hybridization_val), list(chiraltypes)
+    bond_types = set()
+    max_neighbors = 0
+    max_num_atoms = 0
 
+    for natoms, syms, hybs, chirs, bonds, max_nbr in results:
+        atom_symbols |= syms
+        hybridizations |= hybs
+        chiraltypes |= chirs
+        bond_types |= bonds
+        max_neighbors = max(max_neighbors, max_nbr)
+        max_num_atoms = max(max_num_atoms, natoms)
 
-def list_smiles2prop(smi_list):
+    atom_symbols_sorted = sorted(atom_symbols, key=len, reverse=True)
+
+    results = {'max_num_atoms': max_num_atoms+1,
+               'atom_symbols': atom_symbols_sorted,
+               'hybridization_list': list(hybridizations),
+               'chiraltypes': list(chiraltypes),
+               'bonds_list': list(bond_types),
+               'neighbors_max_len': max_neighbors
+               }
     
-    neighbors_max_len = 0
-    all_bonds = set()
-    for smi in smi_list:
-        mol = Chem.MolFromSmiles(smi)
-        mol = Chem.AddHs(mol)
-        for atom in mol.GetAtoms():
-           neighbors = [neighbor.GetSymbol() for neighbor in atom.GetNeighbors()]
-           bonds = [str(bond.GetBondType()) for bond in atom.GetBonds()]
-           all_bonds = all_bonds | set(bonds)
-           if len(neighbors) > neighbors_max_len:
-               neighbors_max_len = len(neighbors)
-               
-    return list(all_bonds), neighbors_max_len
+    return results
 
 
 def list_to_onehot(element, elements_list) -> list:
@@ -300,11 +349,8 @@ def get_atom_info_vector(smiles,
         ring[int(atom.IsInRing())] = 1.0
         ring_list[i] = ring
         
-        with open('/home/rkmvu/Dataset/Coca-2/Experimental_Data_P_app/train_test_partition_literature/All_possible_atoms_X.pkl', 'rb') as fp:
-            logP_dict = pickle.load(fp)
         logP_list[i] = [get_logP_from_csv(logp_dict=logP_dict, mol=mol, atom_idx=i)]
         # logP_list[i] = Atom_logP_Value(mol, i)
-        
             
         ##Neighbour Symbols Encoding
         all_neighbours = [neighbor.GetSymbol() for neighbor in atom.GetNeighbors()]
@@ -402,8 +448,6 @@ def get_atom_info_vector_with_embeddings(smiles,
         aromaticity_list[i] = int(atom.GetIsAromatic())
         ring_list[i] = int(atom.IsInRing())
         
-        with open('/home/rkmvu/Dataset/Coca-2/Experimental_Data_P_app/train_test_partition_literature/All_possible_atoms_X.pkl', 'rb') as fp:
-            logP_dict = pickle.load(fp)
         logP_list[i] = [get_logP_from_csv(logp_dict=logP_dict, mol=mol, atom_idx=i)]
         # logP_list[i] = Atom_logP_Value(mol, i)
         
@@ -589,55 +633,54 @@ def get_bond_matrix(smiles, weighted_flag = True):
     return bond_matrix
 
 
-def get_multirelational_bond_matrix(smiles, bonds_list, weighted_flag=True):
+def get_multirelational_bond_matrix(smiles, bonds_list, weighted_flag=True, include_self_loop = True):
     """
     Generates a multi-relational bond matrix for a given molecule.
+    
     Args:
         smiles (str): SMILES representation of the molecule.
-        bonds_list (list): List of bond types (as strings, e.g., "SINGLE", "DOUBLE").
-        weighted_flag (bool): Whether to use bond type weights. Default is False.
+        bonds_list (list): List of bond types as strings, e.g., ["SINGLE", "DOUBLE"].
+        weighted_flag (bool): Whether to assign numeric weights based on bond order.
+
     Returns:
-        np.ndarray: A multi-relational bond matrix of shape [num_relations, num_atoms, num_atoms].
+        np.ndarray: A [num_relations, num_atoms, num_atoms] bond matrix.
     """
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
         raise ValueError(f"Invalid SMILES: {smiles}")
 
-    # Extract bond types
-    names = Chem.rdchem.BondType.names
-    values = Chem.rdchem.BondType.values
-
-    # Create a dictionary mapping names to their corresponding values
-    bond_type_dict = {name: value for name, value in zip(names.keys(), values)}
-    num_relations = len(bonds_list)
     num_atoms = mol.GetNumAtoms()
+    num_relations = len(bonds_list)
 
-    # Initialize bond matrix
-    bond_matrix = np.zeros((num_relations, num_atoms, num_atoms), dtype=float)
+    if include_self_loop:
+        bond_matrix = np.array([np.eye(num_atoms, num_atoms) for _ in range(num_relations)], dtype=float)
+    else:
+        bond_matrix = np.zeros((num_relations, num_atoms, num_atoms), dtype=float)
 
-    # Populate bond matrix
     for bond in mol.GetBonds():
         i = bond.GetBeginAtomIdx()
         j = bond.GetEndAtomIdx()
-        bond_type = str(bond.GetBondType())
 
-        if bond_type not in bonds_list:
-            continue  # Skip bond types not in the list
+        bond_type_str = str(bond.GetBondType())  # E.g., "SINGLE", "DOUBLE"
+        if bond_type_str not in bonds_list:
+            continue
 
-        relation_idx = bonds_list.index(bond_type)
-        weight = bond_type_dict[bond_type] if weighted_flag else 1
+        relation_idx = bonds_list.index(bond_type_str)
+        
+        # Use numeric weight (1.0, 2.0, etc.) or binary
+        weight = float(bond.GetBondTypeAsDouble()) if weighted_flag else 1.0
+
         bond_matrix[relation_idx, i, j] = weight
         bond_matrix[relation_idx, j, i] = weight
 
-    return bond_matrix
-
+    return torch.tensor(bond_matrix)
 
 
 class GraphDataset(Dataset):
-    def __init__(self, smi_list, labels, max_num_atom, atom_symbols, hybridization_list, chiraltypes, bonds_list):
+    def __init__(self, smi_list, labels, max_num_atoms, atom_symbols, hybridization_list, chiraltypes, bonds_list):
         self.smi_list = smi_list
         self.labels = labels
-        self.max_num_atom = max_num_atom
+        self.max_num_atoms = max_num_atoms
         self.atom_symbols = atom_symbols
         self.hybridization_list = hybridization_list
         self.chiraltypes = chiraltypes
@@ -657,7 +700,7 @@ class GraphDataset(Dataset):
                                                  bonds_list=self.bonds_list
                                                  )
         adj_matrix_temp = get_bond_matrix(smi)#rdmolops.GetAdjacencyMatrix(Chem.MolFromSmiles(smi))
-        adjacency_matrix = torch.eye(self.max_num_atom, self.max_num_atom)
+        adjacency_matrix = torch.eye(self.max_num_atoms, self.max_num_atoms)
         adjacency_matrix[:adj_matrix_temp.shape[0], :adj_matrix_temp.shape[1]] += adj_matrix_temp
         degree_matrix = torch.diag(torch.sum(adjacency_matrix, dim=1))
         y  = self.labels[idx]
@@ -666,16 +709,17 @@ class GraphDataset(Dataset):
     
     
 class Multirelational_GraphDataset(Dataset):
-    def __init__(self, smi_list, labels, max_num_atom, atom_symbols, hybridization_list, chiraltypes, bonds_list, bond_weight_flag=False):
+    def __init__(self, smi_list, labels, max_num_atoms, atom_symbols, hybridization_list, chiraltypes, bonds_list, bond_weight_flag=False, include_self_loop = True, **kwargs):
         self.smi_list = smi_list
         self.labels = labels
-        self.max_num_atom = max_num_atom
+        self.max_num_atoms = max_num_atoms
         self.atom_symbols = atom_symbols
         self.hybridization_list = hybridization_list
         self.chiraltypes = chiraltypes
         self.bonds_list = bonds_list
         self.num_relations = len(bonds_list)
         self.bond_weight_flag = bond_weight_flag
+        self.include_self_loop = include_self_loop
     
     def __len__(self):
         return len(self.smi_list)
@@ -683,41 +727,44 @@ class Multirelational_GraphDataset(Dataset):
     def __getitem__(self, idx):
         
         smi = self.smi_list[idx]
-        atom_feature_vector = get_atom_info_vector(smi,
-                                                 atom_symbols=self.atom_symbols,
-                                                 hybridization_list=self.hybridization_list,
-                                                 chiraltypes=self.chiraltypes,
-                                                 bonds_list=self.bonds_list
-                                                 )
-        # adj_matrix_temp = get_bond_matrix(smi)#rdmolops.GetAdjacencyMatrix(Chem.MolFromSmiles(smi))
-        adj_matrix_temp = get_multirelational_bond_matrix(smi, self.bonds_list, weighted_flag=self.bond_weight_flag)
-        identity_tensor = torch.stack([torch.eye(self.max_num_atom, self.max_num_atom) for _ in range(self.num_relations)])
-        adjacency_tensor = identity_tensor.clone()
-        adjacency_tensor[:adj_matrix_temp.shape[0], :adj_matrix_temp.shape[1], :adj_matrix_temp.shape[2]] += adj_matrix_temp
-        degree_tensor = torch.stack([torch.diag(vector) for vector in adjacency_tensor.sum(axis=1)])
-        
-        #**************************************************************************************
-        ## To get previous results comment this part
-        ## To change to use D^(-1/2)A_D^(-1/2) = D^(-1/2)A_1D^(-1/2) + D^(-1/2)A_2D^(-1/2)
-        degree_tensor = degree_tensor - identity_tensor
-        degree_tensor = degree_tensor.sum(axis=0)
-        temp_idt = torch.zeros_like(degree_tensor)
-        temp_idt[:adj_matrix_temp.shape[1], :adj_matrix_temp.shape[2]] += torch.eye(adj_matrix_temp.shape[1])
-        degree_tensor = degree_tensor + temp_idt
-        #**************************************************************************************
-        
-        #**************************************************************************************
-        # ## To get previous results uncomment this part
-        # if not self.bond_weight_flag:
-        #     mask = degree_tensor != 0.0
-        #     degree_tensor[mask] = degree_tensor[mask] - 1
-        #**************************************************************************************
+        atom_feature_vector, adjacency_tensor, degree_tensor = self.smi2feature(smi)
         y  = self.labels[idx]
         
         return smi, atom_feature_vector, adjacency_tensor, degree_tensor, y
     
+    def smi2feature(self, smi):
+        
+        atom_feature_vector = get_atom_info_vector(smi,
+                                                atom_symbols=self.atom_symbols,
+                                                hybridization_list=self.hybridization_list,
+                                                chiraltypes=self.chiraltypes,
+                                                bonds_list=self.bonds_list
+                                                )
+        # adj_matrix_temp = get_bond_matrix(smi)#rdmolops.GetAdjacencyMatrix(Chem.MolFromSmiles(smi))
+        adj_matrix_temp = get_multirelational_bond_matrix(smi,
+                                                        self.bonds_list,
+                                                        weighted_flag=self.bond_weight_flag,
+                                                        include_self_loop = self.include_self_loop
+                                                        )
+        adjacency_tensor = torch.zeros((self.num_relations, self.max_num_atoms, self.max_num_atoms))
+        # adjacency_tensor = torch.stack([torch.eye(self.max_num_atoms, self.max_num_atoms) for _ in range(self.num_relations)])
+        adjacency_tensor[:adj_matrix_temp.shape[0], :adj_matrix_temp.shape[1], :adj_matrix_temp.shape[2]] = adj_matrix_temp # A = A + I
+        degree_tensor = torch.stack([torch.diag(vector) for vector in adjacency_tensor.sum(axis=1)]) # D = D + I
+        
+        #**************************************************************************************
+        ## To use D^(-1/2) A D^(-1/2) = D^(-1/2) A_1 D^(-1/2) + D^(-1/2) A_2 D^(-1/2) uncomment this part
+        # identity_tensor = torch.stack([torch.eye(self.max_num_atoms, self.max_num_atoms) for _ in range(self.num_relations)])
+        # degree_tensor = degree_tensor - identity_tensor
+        # degree_tensor = degree_tensor.sum(axis=0)
+        # temp_idt = torch.zeros_like(degree_tensor)
+        # temp_idt[:adj_matrix_temp.shape[1], :adj_matrix_temp.shape[2]] += torch.eye(adj_matrix_temp.shape[1])
+        # degree_tensor = degree_tensor + temp_idt
+        #**************************************************************************************
+        
+        return atom_feature_vector, adjacency_tensor, degree_tensor
+    
 class Multirelational_GraphDataset_Embeddings(Dataset):
-    def __init__(self, smi_list, labels, max_num_atom,
+    def __init__(self, smi_list, labels, max_num_atoms,
                          atom_symbols_embedding,
                          bonds_list,
                          atom_symbols,
@@ -728,7 +775,7 @@ class Multirelational_GraphDataset_Embeddings(Dataset):
                          bond_weight_flag=False):
         self.smi_list = smi_list
         self.labels = labels
-        self.max_num_atom = max_num_atom
+        self.max_num_atoms = max_num_atoms
         self.atom_symbols = atom_symbols
         self.atom_symbols_embedding = atom_symbols_embedding
         self.hybridization_embedding = hybridization_embedding
@@ -756,7 +803,7 @@ class Multirelational_GraphDataset_Embeddings(Dataset):
                                                  )
         # adj_matrix_temp = get_bond_matrix(smi)#rdmolops.GetAdjacencyMatrix(Chem.MolFromSmiles(smi))
         adj_matrix_temp = get_multirelational_bond_matrix(smi, self.bonds_list, weighted_flag=self.bond_weight_flag)
-        adjacency_tensor = torch.stack([torch.eye(self.max_num_atom, self.max_num_atom) for _ in range(self.num_relations)])
+        adjacency_tensor = torch.stack([torch.eye(self.max_num_atoms, self.max_num_atoms) for _ in range(self.num_relations)])
         adjacency_tensor[:adj_matrix_temp.shape[0], :adj_matrix_temp.shape[1], :adj_matrix_temp.shape[2]] += adj_matrix_temp
         degree_tensor = torch.stack([torch.diag(vector) for vector in adjacency_tensor.sum(axis=1)])
         if not self.bond_weight_flag:
@@ -766,30 +813,49 @@ class Multirelational_GraphDataset_Embeddings(Dataset):
         
         return smi, atom_feature_vector, adjacency_tensor, degree_tensor, y
             
-            
-def SmilesDataset_graph_gen(split, dataset, out_path = 'SmilesDataset_graph', mean_std_flag = False):
-    
-    SmilesDataset_graph = []
-    _, atom_feature_vector, _, _, _ = dataset[0]
-    features_keys = list(atom_feature_vector.keys())
-    mean_dict, std_dict = dict({}), dict({})
-    for (smi, atom_feature_vector, adjacency_matrix, degree_matrix, y) in tqdm(dataset, desc=split):
-        if atom_feature_vector is None:
-            continue
-        storing_data = {
-            'SMILES': smi,
-            'atom_feature_vector': atom_feature_vector,
-            'adjacency_matrix': adjacency_matrix,
-            'degree_matrix': degree_matrix,
-            'label': y
-        }
-        SmilesDataset_graph.append(storing_data)
+def process_single_sample(data_point):
         
-    filename = out_path+'_'+split+'.pkl'
-    with open(filename, "wb") as outfile:
-        pickle.dump(SmilesDataset_graph, outfile)
+        smi, atom_feature_vector, adjacency_matrix, degree_matrix, y = data_point
+        if atom_feature_vector is None:
+            return None
+        try:
+            return {
+                'SMILES': smi,
+                'atom_feature_vector': atom_feature_vector,
+                'adjacency_matrix': adjacency_matrix,
+                'degree_matrix': degree_matrix,
+                'label': y
+            }     
+        except:
+            print(f'Error found at: {data_point}')
+        
+import resource  # for setting file limits on Unix-like systems
+def limit_open_files(n=4096):
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    new_soft = min(n, hard)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, hard))  
+         
+def SmilesDataset_graph_gen(split, dataset, out_path = 'SmilesDataset_graph', mean_std_flag = False, num_workers=cpu_count()-2, chunksize=10000, filetype='zip'):
+    
+    with Pool(num_workers) as pool:
+        SmilesDataset_graph = list(tqdm(pool.imap_unordered(process_single_sample, dataset, chunksize=chunksize),
+                                        total=len(dataset), desc=split))
+    
+    # Filter out None values
+    SmilesDataset_graph = [d for d in SmilesDataset_graph if d is not None]
+    if filetype == 'zip':
+        filename = out_path + '_' + split + '.pkl.gz'
+        with gzip.open(filename, "wb") as outfile:
+            pickle.dump(SmilesDataset_graph, outfile)
+    if filetype == 'pkl':
+        filename = out_path+'_'+split+'.pkl'
+        with open(filename, "wb") as outfile:
+            pickle.dump(SmilesDataset_graph, outfile)
     
     if mean_std_flag:
+        _, atom_feature_vector, _, _, _ = dataset[0]
+        features_keys = list(atom_feature_vector.keys())
+        mean_dict, std_dict = dict({}), dict({})
         for key in features_keys:
             temp = [data['atom_feature_vector'][key] for data in SmilesDataset_graph]
             concatenated_features = np.concatenate(temp, axis=0)
@@ -807,6 +873,46 @@ def SmilesDataset_graph_gen(split, dataset, out_path = 'SmilesDataset_graph', me
             pickle.dump(std_dict, outfile)
             
     # return None # SmilesDataset_graph, mean_dict, std_dict
+    
+def smi2graphfeature(data,
+                     dataset_mean,
+                     dataset_std,
+                     max_num_atoms,
+                     features_list=['symbol', 'atom_properties', 'hybridization', 'aromaticity', 'ring', 'chirality', 'neighbour_info'], #'3d_descriptors'
+                     padding=True
+                     ):
+        
+    atom_feature_vector = data['atom_feature_vector']
+    try:
+        features = [atom_feature_vector[k] for k in features_list]
+        mean = [dataset_mean[k] for k in features_list]
+        std = [dataset_std[k] for k in features_list]
+        
+        # features = [v for k, v in atom_feature_vector.items() if k in features_list]
+        # mean = [v for k, v in dataset_mean.items() if k in features_list]
+        # std = [v for k, v in dataset_std.items() if k in features_list]
+    except:
+        raise AttributeError(f'Features should be in: {list(atom_feature_vector.keys())}')
+    
+    try:
+        atom_feature_vector = np.concatenate(features, axis=1)
+        atom_feature_vector = torch.from_numpy(atom_feature_vector)
+    except:
+        raise ValueError(f'Error found in: SMILES - {data['SMILES']}, Features - {atom_feature_vector}')
+    
+    dataset_mean = np.concatenate(mean)
+    dataset_std = np.concatenate(std)
+    if padding: 
+        feature_vector = torch.zeros((max_num_atoms, atom_feature_vector.shape[-1]))
+        feature_vector[:len(atom_feature_vector)] = (atom_feature_vector - dataset_mean)/dataset_std
+    else:
+        atom_feature_vector = (atom_feature_vector - dataset_mean)/dataset_std
+        
+    adjacency_matrix = data['adjacency_matrix']
+    degree_matrix = data['degree_matrix']
+    y  = data['label']
+    
+    return feature_vector, adjacency_matrix, degree_matrix, y
 
 class GraphData_from_pickle(Dataset):
     
@@ -819,8 +925,12 @@ class GraphData_from_pickle(Dataset):
         self.features_list = features_list
         self.max_num_atoms = max_num_atoms
         self.padding = padding
-        with open(dataset_path, 'rb') as fp:
-            self.dataset = pickle.load(fp)
+        if dataset_path.endswith('.pkl'):
+            with open(dataset_path, 'rb') as fp:
+                self.dataset = pickle.load(fp)
+        if dataset_path.endswith('.pkl.gz'):
+            with gzip.open(dataset_path, 'rb') as fp:
+                self.dataset = pickle.load(fp)
         
         filename = '/'.join(dataset_path.split('/')[:-1]+['dataset_mean.pkl'])
         with open(filename, 'rb') as fp:
@@ -835,6 +945,12 @@ class GraphData_from_pickle(Dataset):
     def __getitem__(self, idx):
         
         data=self.dataset[idx]
+        feature_vector, adjacency_matrix, degree_matrix, y = self.smi2feature(data)
+        
+        return feature_vector, adjacency_matrix, degree_matrix, y
+    
+    def smi2feature(self, data):
+        
         atom_feature_vector = data['atom_feature_vector']
         try:
             features = [atom_feature_vector[k] for k in self.features_list]
@@ -851,7 +967,7 @@ class GraphData_from_pickle(Dataset):
             atom_feature_vector = np.concatenate(features, axis=1)
             atom_feature_vector = torch.from_numpy(atom_feature_vector)
         except:
-            raise ValueError(f'Error found in: Idx - {idx}, SMILES - {self.get_smiles(idx)}, Features - {atom_feature_vector}')
+            raise ValueError(f'Error found in: SMILES - {data['SMILES']}, Features - {atom_feature_vector}')
         
         dataset_mean = np.concatenate(mean)
         dataset_std = np.concatenate(std)
@@ -924,14 +1040,15 @@ def feature_representation(dataset, model, device):
 
     model.eval()
     with torch.no_grad():  
-        for i, (*data, label) in enumerate(dataset):
-            _inputs = [inp.to(device).unsqueeze(0) for inp in data] 
-            outputs = model.get_features(*[x.type(torch.float32) for x in _inputs])
+        for i, data in tqdm(enumerate(dataset), total=len(dataset), desc=f'Feature Extraction: '):
+            batch = {k: torch.tensor(v).to(device).unsqueeze(0) for k, v in data.items()}
+            targets = batch.pop('labels').squeeze()
+            outputs = model(**batch)
 
             # Convert outputs to CPU for NumPy compatibility
             outputs_np = outputs.cpu().numpy()
             features[i] = outputs_np
-            labels[i] = label
+            labels[i] = targets.cpu().numpy()
             smi_list[i] = dataset.get_smiles(i)
 
     return features, labels, smi_list
@@ -939,7 +1056,7 @@ def feature_representation(dataset, model, device):
 
 def gcn_pred_func(smi, gcn_model, rf_model, dataset_mean, dataset_std, features_list,
                   atom_symbols ,hybridization_list,
-                  chiraltypes, bonds_list, max_num_atom):
+                  chiraltypes, bonds_list, max_num_atoms):
     
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     atom_feature_vector = get_atom_info_vector(smi,
@@ -950,7 +1067,7 @@ def gcn_pred_func(smi, gcn_model, rf_model, dataset_mean, dataset_std, features_
                                                 )
     # adj_matrix_temp = get_bond_matrix(smi)#rdmolops.GetAdjacencyMatrix(Chem.MolFromSmiles(smi))
     adj_matrix_temp = get_multirelational_bond_matrix(smi, bonds_list, weighted_flag=False)
-    identity_tensor = torch.stack([torch.eye(max_num_atom, max_num_atom) for _ in range(len(bonds_list))])
+    identity_tensor = torch.stack([torch.eye(max_num_atoms, max_num_atoms) for _ in range(len(bonds_list))])
     adjacency_tensor = identity_tensor.clone()
     adjacency_tensor[:adj_matrix_temp.shape[0], :adj_matrix_temp.shape[1], :adj_matrix_temp.shape[2]] += adj_matrix_temp
     degree_tensor = torch.stack([torch.diag(vector) for vector in adjacency_tensor.sum(axis=1)])
@@ -979,7 +1096,7 @@ def gcn_pred_func(smi, gcn_model, rf_model, dataset_mean, dataset_std, features_
     dataset_mean = np.concatenate(mean)
     dataset_std = np.concatenate(std)
 
-    feature_vector = torch.zeros((max_num_atom, atom_feature_vector.shape[-1]))
+    feature_vector = torch.zeros((max_num_atoms, atom_feature_vector.shape[-1]))
     feature_vector[:len(atom_feature_vector)] = (atom_feature_vector - dataset_mean)/dataset_std
     gcn_model, feature_vector= gcn_model.to(device), feature_vector.to(device)
 

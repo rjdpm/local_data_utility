@@ -30,35 +30,66 @@ from torchvision.datasets import ImageFolder
 from torchvision.datasets.utils import download_url
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from Generalised_data_utils import regression_test_metrics, datetime_now, create_folder, subset_loader, get_param_names
+from Generalised_data_utils import regression_test_metrics, datetime_now, create_folder, subset_loader, get_func_input_names, auto_repr
 
 __all__ = ['NN_Trainer',
            'weights_initializer',
            'EarlyStopping',
-           'Trainer_functions'
+           'Trainer_functions',
+           'TransferWeights'
            ]
 
 class EarlyStopping:
-    def __init__(self, stop_patience=10, min_delta=1e-5):
+    def __init__(self, stop_patience: int = 10, min_delta: float = 1e-5, type_: str = 'loss'):
         """
+        Early stopping mechanism for model training.
+
         Args:
-            patience (int): How long to wait after last time validation loss improved.
-            min_delta (float): Minimum change in the monitored quantity to qualify as an improvement.
+            stop_patience (int): Number of epochs to wait for improvement before stopping.
+            min_delta (float): Minimum change to qualify as improvement.
+            type_ (str): Metric type to monitor ('loss' or 'accuracy').
+
+        Raises:
+            ValueError: If `type_` is not 'loss' or 'accuracy'.
         """
+        if type_ not in ['loss', 'accuracy']:
+            raise ValueError("type_ must be either 'loss' or 'accuracy'")
+
         self.patience = stop_patience
         self.min_delta = min_delta
+        self.type_ = type_
         self.counter = 0
-        self.best_score = np.inf  # Initialize to infinity
         self.early_stop = False
+        self.best_score = np.inf if self.type_ == 'loss' else -np.inf
 
-    def __call__(self, val_loss: float):
-        if val_loss < self.best_score - self.min_delta:
-            self.best_score = val_loss
-            self.counter = 0  # Reset the counter if there is an improvement
-        else:
-            self.counter += 1  # Increment the counter if no improvement
-            if self.counter >= self.patience:
-                self.early_stop = True  # Set early stop flag
+    def __call__(self, current_score: float):
+        """
+        Update the early stopping status based on the current validation metric.
+
+        Args:
+            current_score (float): Current validation loss or accuracy.
+
+        Returns:
+            None: Updates internal counter and early_stop flag.
+        """
+        if self.type_ == 'loss':
+            if current_score < self.best_score - self.min_delta:
+                self.best_score = current_score
+                self.counter = 0
+            else:
+                self.counter += 1
+                if self.counter >= self.patience:
+                    self.early_stop = True
+
+        elif self.type_ == 'accuracy':
+            if current_score > self.best_score + self.min_delta:
+                self.best_score = current_score
+                self.counter = 0
+            else:
+                self.counter += 1
+                if self.counter >= self.patience:
+                    self.early_stop = True
+                    
                 
 class Trainer_functions:
     
@@ -237,6 +268,7 @@ class Trainer_functions:
                         test_loader: DataLoader[Dict[str, torch.Tensor]],
                         criterion: nn.Module,
                         targets_col: str = 'labels',
+                        description: str = 'Map',
                         device: str=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
                         ) -> Tuple[np.ndarray[float], np.ndarray[float], float]:
         
@@ -264,7 +296,7 @@ class Trainer_functions:
         epoch_test_loss = 0
 
         with torch.no_grad():  # No need to compute gradients during evaluation
-            for batch in test_loader:
+            for batch in tqdm(test_loader, desc=description):
                 batch = {k: v.to(device) for k, v in batch.items()}
                 targets = batch.pop(targets_col)
                 outputs = model(**batch)
@@ -290,6 +322,7 @@ class Trainer_functions:
                 test_loader: DataLoader[Dict[str, torch.Tensor]],
                 criterion: nn.Module,
                 targets_col: str = 'labels',
+                description: str = 'Test',
                 device: str=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
                 ) -> Tuple[Dict[str, float], float]:
         
@@ -313,6 +346,7 @@ class Trainer_functions:
                                                                 test_loader=test_loader,
                                                                 criterion=criterion,
                                                                 targets_col=targets_col,
+                                                                description = description,
                                                                 device=device
                                                                 )
         results = regression_test_metrics(y_true=y_true, y_pred=y_pred)
@@ -326,6 +360,7 @@ class Trainer_functions:
                 test_loader: DataLoader[Dict[str, torch.Tensor]],
                 criterion: nn.Module,
                 targets_col: str = 'labels',
+                description: str = 'Train-Test',
                 device: str=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
                 ) -> Tuple[float, float]:
         
@@ -348,6 +383,7 @@ class Trainer_functions:
                                                                 test_loader=test_loader,
                                                                 criterion=criterion,
                                                                 targets_col=targets_col,
+                                                                description=description,
                                                                 device=device
                                                                 )
 
@@ -366,6 +402,7 @@ class Trainer_functions:
                     lambda_reg: float = 0.1,
                     alpha: float = 0.5,
                     targets_col: str = 'labels',
+                    description: str = 'Training',
                     device: str=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
                     ) -> float:
             
@@ -390,9 +427,9 @@ class Trainer_functions:
         model.train()# switch to train model
         model = model.to(device)
         epoch_train_loss = 0
-        model_params = get_param_names(model.forward)
+        model_params = get_func_input_names(model.forward)
         # with torch.autograd.set_detect_anomaly(True):
-        for i, batch in tqdm(enumerate(train_loader), total=len(train_loader)):
+        for i, batch in tqdm(enumerate(train_loader), total=len(train_loader), desc=description):
             # print(f'Train Batch: {i}\n')
             # batch = {k: v.to(device) for k, v in batch.items() if k in model_params}
             targets = batch.pop(targets_col).to(device)
@@ -451,7 +488,7 @@ class Trainer_functions:
                     ylabel_acc: str = 'r2_value',
                     ylabel_loss: str = 'Loss_value',
                     title: str = 'Loss and Accuracy Plot',
-                    results_savepath: str = '.',
+                    results_savepath: str = '',
                     save_image_filename: str = 'Untitled',
                     loss_save_filename: str = 'loss_acc_file',
                     best_model_savename: str = 'best_model',
@@ -514,7 +551,8 @@ class Trainer_functions:
             NameError: If `save_model_wrt` is not 'loss' or 'accuracy'.
         """
         
-        results_savepath = f"{results_savepath}/cache/{date}/{time}"
+        if not results_savepath:
+            results_savepath = f"./cache/{date}/{time}"
         models_savepath = create_folder(f"{results_savepath}/models")
         best_model_savepath = f"{models_savepath}/{best_model_savename}"
         
@@ -605,6 +643,7 @@ class Trainer_functions:
                                 ) if scheduler_name and schedulers_kwargs else None # is instance of torch.optim.lr_scheduler.LRScheduler
         
         # Initializing Early Stopping
+        early_stop_kwargs={**early_stop_kwargs, 'type_':save_model_wrt}
         early_stopping = EarlyStopping(**early_stop_kwargs) if early_stop and early_stop_kwargs else None
         progress_bar = tqdm(range(num_epochs), desc="Training", unit="Eps")
 
@@ -616,15 +655,16 @@ class Trainer_functions:
                                             criterion,
                                             optimizer,
                                             device=device,
-                                            targets_col=targets_col
+                                            targets_col=targets_col,
+                                            description = 'Training',
                                             )
             train_acc, epoch_train_loss = Trainer_functions.train_test_model(model=model, test_loader=train_loader_subset,
-                                                        criterion=criterion, device=device, targets_col=targets_col)
+                                                        criterion=criterion, device=device, targets_col=targets_col, description='Test-on-Train')
             test_acc, epoch_test_loss = Trainer_functions.train_test_model(model=model, test_loader=test_loader_subset,
-                                                        criterion=criterion, device=device, targets_col=targets_col)
+                                                        criterion=criterion, device=device, targets_col=targets_col, description='Test-on-Test')
             val_acc, epoch_val_loss = Trainer_functions.train_test_model(model=model, test_loader=val_loader_subset,
-                                                    criterion=criterion, device=device, targets_col=targets_col)
-            
+                                                    criterion=criterion, device=device, targets_col=targets_col, description='Test-on-Val')
+
             # train_acc, test_acc, val_acc = train_acc, test_acc, val_acc
             train_acc_list[epoch] = round(train_acc, 2)
             test_acc_list[epoch] = round(test_acc, 2)
@@ -721,8 +761,9 @@ class Trainer_functions:
                 else:
                     scheduler.step()
             
-            if early_stop:    
-                early_stopping(epoch_val_loss)
+            if early_stop:  
+                early_stop_val = val_acc if save_model_wrt=='accuracy' else  epoch_val_loss
+                early_stopping(early_stop_val)
                 if early_stopping.early_stop:
                     print(f"Early stop triggered at epoch: {epoch + 1}")
                     print('='*80)
@@ -731,17 +772,17 @@ class Trainer_functions:
             Train Acc: {best_train_acc}, Test Acc: {best_test_acc}, Val Acc: {best_val_acc}')
                 
         Trainer_functions.plot_loss_save_images(train_acc=train_acc_list, 
-                                test_acc=test_acc_list,
-                                val_acc=val_acc_list,
-                                train_loss=epoch_train_losses, 
-                                test_loss=epoch_test_losses,
-                                val_loss=epoch_val_losses,
-                                xlabel = xlabel,
-                                ylabel_acc = ylabel_acc,
-                                ylabel_loss = ylabel_loss,
-                                title = title,
-                                save_image_filename = f"{results_savepath}/{save_image_filename}"
-                            )
+                                                test_acc=test_acc_list,
+                                                val_acc=val_acc_list,
+                                                train_loss=epoch_train_losses, 
+                                                test_loss=epoch_test_losses,
+                                                val_loss=epoch_val_losses,
+                                                xlabel = xlabel,
+                                                ylabel_acc = ylabel_acc,
+                                                ylabel_loss = ylabel_loss,
+                                                title = title,
+                                                save_image_filename = f"{results_savepath}/{save_image_filename}"
+                                               )
                 
 
         print('Training completed.')
@@ -944,7 +985,8 @@ class Trainer_functions:
                     'test_acc': test_acc, 
                     
                     'state_dict': copy.deepcopy(model.state_dict()),
-                    'optimizer': copy.deepcopy(optimizer.state_dict())
+                    'optimizer': copy.deepcopy(optimizer.state_dict()),
+                    'representation': str(repr(model).replace('\n', ''))
                     }, network_save_filename)
     #------------------------------------------------------
 
@@ -984,6 +1026,7 @@ class Trainer_functions:
     def load_test_network(network: nn.Module,
                         optimizer: torch.optim.Optimizer,
                         temp_network_path: str = '',
+                        strict: bool = True,
                         device: str = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
                         ):
         """
@@ -1003,7 +1046,7 @@ class Trainer_functions:
         if os.path.isfile(temp_network_path):
             print('-'*80)
             print('Loading pre-trained network checkpoint from: "{}"'.format(temp_network_path))
-            checkpoint = torch.load(temp_network_path, map_location=device)
+            checkpoint = torch.load(temp_network_path, map_location=device, weights_only=False)
             #--------------------------------------------------
             epoch_best_network = checkpoint.get('epoch', 'UNKNOWN')
             train_loss = checkpoint.get('train_loss', 'NA')
@@ -1014,24 +1057,26 @@ class Trainer_functions:
             test_acc = checkpoint.get('test_acc', 'NA')
             network_pyfile = checkpoint.get('network_pyfile', 'NA')
             model_class = checkpoint.get('model_class', 'NA')
-            standardscaler = checkpoint.get('standardscaler', None)
+            standardscaler = checkpoint.get('standardscaler', False)
+            model_repr = checkpoint.get('representation', False)
             #--------------------------------------------------
             #+++++++++++++++++++++++++++++++++++++++++++++++++++
                 
-            network.load_state_dict(checkpoint['state_dict'], strict=True)
-            # optimizer.load_state_dict(checkpoint['optimizer'], strict=False)
+            network.load_state_dict(checkpoint['state_dict'], strict=strict)
             
             print('Loaded pre-trained network checkpoint from "{}"\nepoch: {} train loss: {} val loss: {} test loss: {} train acc: {} val acc: {} test acc: {} ' \
                 .format(temp_network_path, epoch_best_network, train_loss[-1], val_loss[-1], test_loss[-1], train_acc[-1], val_acc[-1], test_acc[-1])
                     )
             print('='*80)
+            
+            return model_repr, standardscaler, model_class, network_pyfile
         else:
             print('-'*80)
             print(f'No pre-trained network checkpoint found at "{temp_network_path}"')
             print('='*80)
             # warnings.warn(f'No pre-trained network checkpoint found at "{temp_network_path}"')
         
-        return standardscaler, model_class, network_pyfile
+        
 
 
 class weights_initializer:
@@ -1181,45 +1226,6 @@ class weights_initializer:
         elif isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d, nn.LayerNorm)):
             nn.init.ones_(m.weight)
             nn.init.zeros_(m.bias)
-
-
-
-class EarlyStopping:
-    def __init__(self, stop_patience=5, min_delta=1e-5):
-        """
-        Initialize the early stopping mechanism for model training.
-
-        Args:
-            stop_patience (int): Number of epochs to wait for improvement before stopping.
-            min_delta (float): Minimum change in validation loss to be considered as improvement.
-
-        Output:
-            Initializes tracking variables for early stopping logic.
-        """
-        self.patience = stop_patience+2
-        self.min_delta = min_delta
-        self.counter = 0
-        self.best_score = np.inf  # Initialize to infinity
-        self.early_stop = False
-
-    def __call__(self, val_loss):
-        """
-        Update the early stopping status based on the current validation loss.
-
-        Args:
-            val_loss (float): Current validation loss.
-
-        Output:
-            Updates internal counters and sets early_stop to True if stopping condition is met.
-        """
-        if val_loss < self.best_score + self.min_delta:
-            self.best_score = val_loss
-            self.counter = 0  # Reset the counter if there is an improvement
-        else:
-            self.counter += 1  # Increment the counter if no improvement
-            if self.counter >= self.patience:
-                self.early_stop = True  # Set early stop flag
-                    
 
 class NN_Trainer():
     
@@ -1407,6 +1413,15 @@ class NN_Trainer():
                 f"{'    Train-Test Subset':35} : {int(self.num_train * self.subset_ratio)} samples\n"
                 f"{'    Val-Test Subset':35} : {int(self.num_val * self.subset_ratio)} samples\n"
                 f"{'    Test-Test Subset':35} : {int(self.num_test * self.subset_ratio)} samples\n"
+                f"{'-'*60}\n"
+                f"{'## Class Representation ##'}\n"
+                f"{'-'*60}\n"
+                f"{repr(self)}\n"
+                f"{'-'*60}\n"
+                f"{'## Network Representation ##'}\n"
+                f"{'-'*60}\n"
+                f"{repr(self.network)}\n"
+                f"{'-'*60}\n"
             )
         
         return out + '\n' + '-'*80 + '\n' + '='*80 + '\n' + self.more_description
@@ -1416,24 +1431,7 @@ class NN_Trainer():
         Developer-focused representation: full instantiation parameters for debugging. 
         Should ideally be valid Python code that recreates the object "(eval(repr(obj)))".
         """
-        out =  (
-            f"{self.__class__.__name__}(\n"
-            f"  network={self.network.__class__.__name__},\n"
-            f"  optimizer='{self.optimizer_name}',\n"
-            f"  learning_rate={self.learning_rate},\n"
-            f"  loss='{self.loss_name}',\n"
-            f"  scheduler='{self.scheduler_name}',\n"
-            f"  early_stop={self.early_stop},\n"
-            f"  num_epochs={self.num_epochs},\n"
-            f"  batch_size={self.batch_size},\n"
-            f"  device='{self.device}',\n"
-            f"  save_model_per_epoch={self.save_model_per_epoch},\n"
-            f"  save_model_wrt='{self.save_model_wrt}',\n"
-            f"  model_save_name='{self.model_save_name}'\n"
-            f")"
-        )
-        
-        return out
+        return auto_repr(self)
     
     def create_description(self):
         """
@@ -1766,7 +1764,8 @@ class NN_Trainer():
                     'test_acc': self.test_acc_list[:self.epoch], 
                     
                     'state_dict': self.network.state_dict(),
-                    'optimizer_state_dict': self.optimizer.state_dict()
+                    'optimizer_state_dict': self.optimizer.state_dict(),
+                    'representation': str(repr(self.network).replace('\n', ''))
                     }, network_save_filename)
     #------------------------------------------------------
 
@@ -1973,6 +1972,7 @@ class NN_Trainer():
             self.test_acc = checkpoint.get('test_acc', [])
             self.network_pyfile = checkpoint.get('network_pyfile' 'NA')
             self.utils_pyfile = checkpoint.get('utils_pyfile' 'NA')
+            self.network_object = checkpoint.get('representation' 'NA')
             #+++++++++++++++++++++++++++++++++++++++++++++++++++
                 
             self.network.load_state_dict(checkpoint['state_dict'])
@@ -1989,5 +1989,52 @@ class NN_Trainer():
                     )
         print('-'*80)
             
-            
 
+class TransferWeights:
+    def __init__(self, source: Union[str, nn.Module, dict], map_location: str = "cpu"):
+        """
+        Initialize loader with a path, state_dict, or model.
+        
+        Args:
+            source (str | nn.Module | dict): Path to .pt/.pth file, 
+                                            a loaded nn.Module, 
+                                            or a state_dict.
+            map_location (str): Device mapping for loading.
+        """
+        if isinstance(source, str):  # path to file
+            self.checkpoint = torch.load(source, map_location=map_location, weights_only=False)['state_dict']
+        elif isinstance(source, nn.Module):  # full model
+            self.checkpoint = source.state_dict()
+        elif isinstance(source, dict):  # state_dict
+            self.checkpoint = source
+        else:
+            raise ValueError("Source must be path, state_dict, or nn.Module.")
+
+    def _load_state_dict(self, model: nn.Module, state_dict: dict, strict: bool=False) -> nn.Module:
+        
+        """Safely load a state_dict into the model."""
+        missing_keys, unexpected_keys = "", ""
+        try:
+            model.load_state_dict(state_dict, strict=strict)
+        except:
+            # Fallback: partial load
+            model_dict = model.state_dict()
+            model_dict.update({k: v for k, v in state_dict.items() if k in model_dict and v.shape == model_dict[k].shape})
+            missing_keys, unexpected_keys = model.load_state_dict(model_dict, strict=strict)
+            
+            missings = {'missing_keys':missing_keys, 'unexpected_keys':unexpected_keys}
+            
+        return missings
+
+    def transfer_into(self, model: nn.Module, strict: bool = False) -> nn.Module:
+        """
+        Load the checkpoint into the provided model.
+        
+        Args:
+            model (nn.Module): Target model.
+            strict (bool): Enforce exact layer match.
+        
+        Returns:
+            nn.Module: Model with weights loaded.
+        """
+        return self._load_state_dict(model, self.checkpoint, strict)

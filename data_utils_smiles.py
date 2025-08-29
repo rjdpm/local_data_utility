@@ -1,4 +1,5 @@
 import re
+import os
 import ast
 import math
 import copy
@@ -13,6 +14,7 @@ from orderedset import OrderedSet
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from sklearn.svm import SVC, SVR
 from sklearn.neighbors import KDTree, NearestNeighbors
+from multiprocessing import Pool, cpu_count
 from typing import Any, List, Dict, Tuple, Union, Set, Callable, Optional
 
 from rdkit import Chem, DataStructs
@@ -20,6 +22,7 @@ from rdkit.Chem import Draw, rdDepictor, AllChem, rdMolDescriptors, Descriptors,
 from rdkit.Chem.Draw import rdMolDraw2D
 from rdkit.Chem.rdFingerprintGenerator import GetMorganGenerator, AdditionalOutput
 from mordred import Calculator, descriptors
+from rdkit.Chem.MolStandardize import rdMolStandardize
 
 import py3Dmol
 from rdkit.Chem.Descriptors3D import (
@@ -33,8 +36,16 @@ import torch.nn as nn
 __all__ = [  
     'canonicalize_smiles',
     'canonicalize_smiles_list',
+    'smi2bonds',
+    'smi2atoms',
+    'get_unique_atoms_from_smiles',
+    'get_all_unique_atoms',
+    'get_main_organic_smiles',
+    'standardize_molecules',
     'randomize_smiles',
     'augment_smiles_with_labels',
+    'smiles_validity_check',
+    'atom_filter_smiles',
     
     'draw_molecule',
     'plot_smiles_grid',
@@ -63,9 +74,12 @@ __all__ = [
     
     'calculate_similarities_distances',
     'calculate_similarity_distance',
-    'calculate_fingerprint',
+    'calculate_fingerprint_from_smiles',
+    'calculate_multiple_fingerprints_all',
     'calculate_all_fingerprints',
+    'calculate_multiple_fingerprints_from_smiles',
     'closest_neighbour_smiles',
+    'smiles_to_morgan_fps',
     
     'smi2chars',
     'listsmi2chars',
@@ -79,6 +93,7 @@ __all__ = [
     'bool_onehot_encodings2smiles',
     
     'nearest_neighbours',
+    'nearest_neighbours_smiles',
 ]
            
             
@@ -112,6 +127,114 @@ def canonicalize_smiles_list(smiles_list: list) -> list:
         canonical_smiles_list[i] = canonical_smiles
         
     return canonical_smiles_list
+
+def smi2bonds(smi):
+    mol = Chem.MolFromSmiles(smi)
+    bond_types=set()
+    for atom in mol.GetAtoms():
+        bonds = [str(bond.GetBondType()) for bond in atom.GetBonds()]
+        bond_types |= set(bonds)
+    if 'DATIVE' in bond_types:
+        return True
+    else:
+        return False
+    
+def smi2atoms(smi):
+    
+    try:
+        atoms=[]
+        mol = Chem.MolFromSmiles(smi)
+        for atom in mol.GetAtoms():
+            atoms.append(atom.GetSymbol())
+        return atoms
+    except:
+        return []
+
+def smiles_validity_check(smiles):
+    
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return False
+    else:
+        return True
+        
+def atom_filter_smiles(smiles,
+                       all_atoms=set(['Br', 'Cl', 'P', 'I', 'F', 'H', 'S', 'N', 'O', 'C', 'B', 'Si', 'Na', 'K'])
+                       ):
+    try:
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            return False
+        symbols = {atom.GetSymbol() for atom in mol.GetAtoms()}
+        return (symbols.issubset(all_atoms) and mol.GetNumAtoms() >= 5)
+    except Exception:
+        return False
+
+def get_unique_atoms_from_smiles(smi):
+    
+    try:
+        mol = Chem.MolFromSmiles(smi)
+        if mol is None:
+            return set()
+        return set(atom.GetSymbol() for atom in mol.GetAtoms())
+    except:
+        return set()
+
+def get_all_unique_atoms(smiles_list, num_workers=None):
+    
+    if num_workers is None:
+        num_workers = min(cpu_count()-2, 16)  # Limit to avoid over-parallelization
+
+    with Pool(num_workers) as pool:
+        results = pool.map(get_unique_atoms_from_smiles, smiles_list)
+
+    all_atoms = set().union(*results)
+    
+    return sorted(all_atoms)
+
+def standardize_molecules(smiles):
+    
+    try:
+        mol = Chem.MolFromSmiles(smiles)
+        # removeHs, disconnect metal atoms, normalize the molecule, reionize the molecule
+        clean_mol = rdMolStandardize.Cleanup(mol) 
+
+        # if many fragments, get the "parent" (the actual mol we are interested in) 
+        clean_mol = rdMolStandardize.FragmentParent(clean_mol)
+
+        # try to neutralize molecule
+        uncharger = rdMolStandardize.Uncharger() # annoying, but necessary as no convenience method exists
+        clean_mol = uncharger.uncharge(clean_mol)
+
+        # # try to Canonicalize tautomers
+        # te = rdMolStandardize.TautomerEnumerator() 
+        # clean_mol = te.Canonicalize(clean_mol)
+        return Chem.MolToSmiles(clean_mol)
+    except:
+        return None
+
+def get_main_organic_smiles(smiles):
+    
+    # Convert input SMILES to RDKit Mol object
+    try:
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            raise ValueError("Invalid SMILES string")
+
+        # Fragment the molecule into disconnected components
+        frags = Chem.GetMolFrags(mol, asMols=True, sanitizeFrags=True)
+
+        # Filter out inorganic/small fragments (e.g., H+, Cl-) by number of heavy atoms
+        # You may also choose by molecular weight, logP, or other criteria
+        organic_frags = [frag for frag in frags if rdMolDescriptors.CalcNumHeavyAtoms(frag) > 4]
+
+        # If multiple remain, pick the one with highest heavy atom count
+        main_frag = max(organic_frags, key=rdMolDescriptors.CalcNumHeavyAtoms)
+
+        # Convert back to SMILES
+        return Chem.MolToSmiles(main_frag)
+    except:
+        return None
 
 
 def randomize_smiles(smiles, n_aug=5):
@@ -163,53 +286,86 @@ def draw_molecule(smiles: str,
 
 def plot_smiles_grid(smiles_list: List[str],
                      legends: List[str]=None,
+                     titles: List[str]=None,
                      cols: int = 8,
                      image_size: Tuple[int] = (400, 400),
                      figsize: Tuple[int] = (24, 12),
-                     legendfontsize = 12,
+                     legendfontsize: int = 12,
                      savepath: str = '',
-                     suptitle = ''
+                     suptitle: str = '',
+                     caption: str = '',
+                     row_lines: bool = True
                      ) -> None:
     """
     Create a grid plot of molecules from SMILES strings.
 
     Parameters:
         smiles_list (list of str): List of SMILES strings.
+        legends (list of str, optional): Captions below each molecule.
+        titles (list of str, optional): Titles above each molecule.
         cols (int): Number of columns in the grid.
         image_size (tuple): Size of each image (width, height).
         figsize (tuple): Overall size of the grid figure (width, height).
+        suptitle (str): Title for the entire figure.
+        caption (str): Caption for the entire figure.
     """
+    titlefontsize=legendfontsize +2
     num_molecules = len(smiles_list)
     rows = math.ceil(num_molecules / cols)
     fig, axs = plt.subplots(rows, cols, figsize=figsize)
 
-    for i, ax in enumerate(axs.flat):
+    # If there's only one row/col, axs won't be 2D
+    axs = axs.flatten() if isinstance(axs, (list, np.ndarray)) else [axs]
+
+    for i, ax in enumerate(axs):
         if i < num_molecules:
             smiles = smiles_list[i]
             mol = Chem.MolFromSmiles(smiles)
             if mol:
                 img = Draw.MolToImage(mol, size=image_size)
                 ax.imshow(img)
+
+                # Add per-molecule title above
+                if titles:
+                    ax.set_title(titles[i], fontsize=titlefontsize)#, pad=10)
+
+                # Add per-molecule caption below
                 if legends:
-                    ax.text(0.5, 0.1, legends[i], fontsize=legendfontsize, ha="center", va="center", transform=ax.transAxes) 
+                    ax.text(0.5, -0.15, legends[i], fontsize=legendfontsize, 
+                            ha="center", va="center", transform=ax.transAxes)
             else:
-                ax.text(0.5, 0.5, 'Invalid SMILES', horizontalalignment='center', verticalalignment='center')
-        ax.axis('off')  # Turn off axes for all subplots
+                ax.text(0.5, 0.5, 'Invalid SMILES', 
+                        ha='center', va='center', fontsize=12)
+        ax.axis('off')  # Hide axes
 
-    # Hide unused axes
+    # # Hide unused axes
     for j in range(num_molecules, rows * cols):
-        axs.flat[j].axis('off')
-    if suptitle:
-        plt.suptitle(suptitle, fontsize=18, fontweight='normal')
+        axs[j].axis('off')
 
-    # Adjust layout to prevent overlapping
-    plt.tight_layout()
-    
+    if suptitle:
+        plt.suptitle(suptitle, fontsize=20, fontweight='bold')
+
+    if caption:
+        plt.figtext(0.5, -0.02, caption, wrap=True, ha="center", fontsize=12)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])  # leave space for suptitle + caption
+    plt.grid()
+    # for r in range(1, rows):
+    #     # get bottom of this row
+    #     y = axs[r].get_position().y0  
+    #     fig.add_artist(plt.Line2D([0.02, 0.98], [y, y], transform=fig.transFigure,
+    #                           color="black", lw=1, alpha=0.6))
+    if row_lines and rows > 1:
+        for r in range(rows):
+            y =0.95- ((r / rows)*0.95)
+            fig.add_artist(plt.Line2D([0.02, 0.98], [y, y], color="black", lw=1, alpha=0.5, transform=fig.transFigure))
+
     if savepath:
-        plt.savefig(savepath,  dpi=100)
+        plt.savefig(savepath, dpi=300, bbox_inches='tight')
         plt.close()
     else:
         plt.show()
+
         
         
 def draw_mol_grid_with_legends(smiles_list: List[str],
@@ -244,7 +400,6 @@ def draw_mol_grid_with_legends(smiles_list: List[str],
     grid_img = Draw.MolsToGridImage(
         mols,
         legends=legends,
-        
         molsPerRow=grid_size[1],
         subImgSize=subimage_size,  # Larger size for each molecule image
         highlightAtomLists=highlight_atoms,
@@ -314,7 +469,7 @@ def color_maps()-> dict:
     
     # Define color palette for different atom types and bonds
     COLOR_FRAC = [
-        (1, 1, 0),      # Yellow for center atom
+        (1, 0.5, 0),      # Yellow for center atom
         (1, 0.1, 1),    # Pink for ring atom
         (0.1, 1, 1),    # Cyan for aromatic atom
         (0.9, 0.9, 0.9),# Light gray for others
@@ -822,23 +977,47 @@ def process_in_parallel(smiles_list: List[str],
                         mordred_calc: Calculator,
                         n_jobs: int =8,
                         chunk_size:int = 1000,
-                        ordered: bool = False
+                        ordered: bool = False,
+                        df_savepath: str = 'temp',
+                        save_per_item: int = 10000,
                         ) -> List[Dict[str, int|float|str]]:
     """Process SMILES list in parallel with descriptor calculation."""
     
-    with mp.Pool(processes=n_jobs,
-                 initializer=initializer,
-                 initargs=(rdkit_funcs, mordred_calc)
-                 ) as pool:
-        imap_func = pool.imap if ordered else pool.imap_unordered
-        results = list(tqdm(imap_func(compute_descriptors,
-                                      smiles_list,
-                                      chunksize=chunk_size
-                                      ),
-                            total=len(smiles_list),
-                            desc="Calculating Descriptors"
-                            )
-                       )
+    if os.path.isfile(df_savepath):
+        results = pd.read_csv(df_savepath)
+        print(f'Found {len(results)} records at: {df_savepath}')
+        existing_smiles = set(results['SMILES'].tolist())
+        smiles_list = [s for s in tqdm(smiles_list) if s not in existing_smiles]
+        results = results.to_dict(orient="records")
+        print(f"Number of remaining SMILES: {len(smiles_list)}")
+    else:
+        results = []
+        
+    for i in tqdm(range((len(smiles_list)//save_per_item)+1)):
+        temp_smiles_list = smiles_list[save_per_item*i:save_per_item*(i+1)]
+        with mp.Pool(processes=n_jobs,
+                initializer=initializer,
+                initargs=(rdkit_funcs, mordred_calc)
+                ) as pool:
+            imap_func = pool.imap if ordered else pool.imap_unordered
+            temp_results = list(tqdm(imap_func(compute_descriptors,
+                                        temp_smiles_list,
+                                        # chunksize=chunk_size
+                                        ),
+                                total=len(temp_smiles_list),
+                                desc="Calculating Descriptors"
+                                )
+                        )
+        results = results + temp_results
+        # if len(results)%save_per_item == 0:
+        temp = [r for r in results if r is not None]
+        df = pd.DataFrame(temp)
+        for col in df.columns:
+            if col != 'SMILES':
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        if df_savepath:
+            df.to_csv(df_savepath, index=False)
+            print(f"Descriptor data saved to: {df_savepath}")
     return [r for r in results if r is not None]
 
 
@@ -853,17 +1032,18 @@ def listsmiles2propdf(smiles_list: List[str],
     print("Preparing descriptor functions...")
     rdkit_funcs, mordred_calc = create_descriptor_functions(descriptor_names)
 
-    n_jobs = mp.cpu_count() - 1
-    chunk_size = max(1000, len(smiles_list) // (10 * n_jobs))
+    n_jobs = int(mp.cpu_count()/2) - 1
+    chunk_size = min(10, len(smiles_list) // (10 * n_jobs))
     print(f"Using {n_jobs} CPU cores with chunk size: {chunk_size}")
-
     descriptor_data = process_in_parallel(
         smiles_list=smiles_list,
         rdkit_funcs=rdkit_funcs,
         mordred_calc=mordred_calc,
         n_jobs=n_jobs,
         chunk_size=chunk_size,
-        ordered=ordered_parallel_processing
+        ordered=ordered_parallel_processing,
+        df_savepath = f"{df_savepath}",
+        save_per_item=100000,
     )
 
     df = pd.DataFrame(descriptor_data)
@@ -904,7 +1084,7 @@ def load_or_compute_descriptors(df: pd.DataFrame,
         smiles_list = df[smiles_column_name].tolist()
         new_df = listsmiles2propdf(smiles_list=smiles_list,
                                    descriptor_names=missing_desc_names,
-                                   df_savepath=None,
+                                   df_savepath=f'{df_savepath}_temp',
                                    ordered_parallel_processing=ordered_parallel_processing)
 
         # Ensure column match before merging
@@ -913,6 +1093,7 @@ def load_or_compute_descriptors(df: pd.DataFrame,
 
         final_df = pd.merge(df, new_df, on=smiles_column_name, how='inner')
 
+        
         if df_savepath:
             final_df.to_csv(df_savepath, index=False)
 
@@ -997,17 +1178,18 @@ def safe_divide(numerator, denominator):
 
 def get_fingerprint(mol, name: str):
     
-    if name == 'RDKit':
+    name = name.strip().lower()
+    if name == 'rdkit':
         return Chem.RDKFingerprint(mol)
-    elif name == 'Pattern':
+    elif name == 'pattern':
         return Chem.PatternFingerprint(mol)
-    elif name == 'MACCSKeys':
+    elif name == 'maccskeys':
         return rdMolDescriptors.GetMACCSKeysFingerprint(mol)
-    elif name == 'TopologicalTorsion':
+    elif name == 'topologicaltorsion':
         return AllChem.GetTopologicalTorsionGenerator().GetFingerprint(mol)
-    elif name == 'Morgan':
+    elif name == 'morgan':
         return AllChem.GetMorganGenerator(radius=2).GetFingerprint(mol)
-    elif name == 'AtomPair':
+    elif name == 'atompair':
         return AllChem.GetAtomPairGenerator().GetFingerprint(mol)
     else:
         raise ValueError(f"Invalid fingerprint name: {name}")
@@ -1019,15 +1201,47 @@ def fingerprint_to_array(fp) -> np.ndarray:
     
     return arr
 
-def calculate_fingerprint(mol: str, fingerprint_name: str) -> np.ndarray:
-# def calculate_fingerprint(smiles: str, fingerprint_name: str) -> np.ndarray:
+def calculate_fingerprint_from_mol(mol: str, fingerprint_name: str) -> np.ndarray:
     
-    # mol = Chem.MolFromSmiles(smiles)
     if mol is None:
         raise ValueError("Invalid SMILES string")
     fp = get_fingerprint(mol, fingerprint_name)
     
     return fingerprint_to_array(fp)
+
+def calculate_fingerprint_from_smiles(smiles: str, fingerprint_name: str) -> np.ndarray:
+    
+    return calculate_fingerprint_from_mol(Chem.MolFromSmiles(smiles), fingerprint_name)
+
+def calculate_multiple_fingerprints_from_mol(mol: str, fingerprint_names: List[str]) -> dict:
+
+    all_results = OrderedDict({})
+    if mol is None:
+        raise ValueError("Invalid SMILES string")
+    for fp_name in fingerprint_names:
+        fp = get_fingerprint(mol, fp_name)
+        all_results[fp_name] = fingerprint_to_array(fp)
+    
+    return all_results
+
+def calculate_multiple_fingerprints_from_smiles(smiles: str, fingerprint_names: List[str]) -> dict:
+
+    all_results = OrderedDict({'smiles':smiles})
+    mol = Chem.MolFromSmiles(smiles)
+    temp = calculate_multiple_fingerprints_from_mol(mol, fingerprint_names)
+    all_results = {**all_results, **temp}
+
+    return all_results
+
+def calculate_multiple_fingerprints_all(smiles_list:List[str],
+                                        fingerprint_names: List[str]
+                                        ) -> pd.DataFrame:
+    
+    all_results = [None]*len(smiles_list)
+    for i, smiles in enumerate(smiles_list):
+        all_results[i].append(calculate_multiple_fingerprints_from_smiles(smiles, fingerprint_names))
+    
+    return all_results
 
 def get_abcd(fp1: np.ndarray, fp2: np.ndarray) -> Tuple[int, int, int, int]:
     
@@ -1063,8 +1277,8 @@ def compute_similarity_distance_metrics(a, b, c, d) -> Tuple[dict, dict]:
 
 def calculate_similarities_distances(smiles1: str, smiles2: str, fingerprint_name: str = 'RDKit') -> Tuple[dict, dict]:
     
-    fp1 = calculate_fingerprint(smiles1, fingerprint_name)
-    fp2 = calculate_fingerprint(smiles2, fingerprint_name)
+    fp1 = calculate_fingerprint_from_smiles(smiles1, fingerprint_name)
+    fp2 = calculate_fingerprint_from_smiles(smiles2, fingerprint_name)
     a, b, c, d = get_abcd(fp1, fp2)
     
     return compute_similarity_distance_metrics(a, b, c, d)
@@ -1072,8 +1286,8 @@ def calculate_similarities_distances(smiles1: str, smiles2: str, fingerprint_nam
 def calculate_similarity_distance(smiles1: str, smiles2: str, fingerprint_name: str = 'RDKit',
                                    distance_metric: str = 'Euclidean', similarity_metric: str = 'Tanimoto') -> Tuple[float, float]:
     
-    fp1 = calculate_fingerprint(smiles1, fingerprint_name)
-    fp2 = calculate_fingerprint(smiles2, fingerprint_name)
+    fp1 = calculate_fingerprint_from_smiles(smiles1, fingerprint_name)
+    fp2 = calculate_fingerprint_from_smiles(smiles2, fingerprint_name)
     a, b, c, d = get_abcd(fp1, fp2)
     sims, dists = compute_similarity_distance_metrics(a, b, c, d)
 
@@ -1113,12 +1327,45 @@ def calculate_all_fingerprints(smiles: str) -> dict:
     return {name: fingerprint_to_array(get_fingerprint(mol, name)) for name in names}
 
 
+def smiles_to_morgan_fps(df: pd.DataFrame, smiles_col: str = "smiles", radii=(0, 1, 2), n_bits: int = 2048) -> pd.DataFrame:
+    """
+    Compute Morgan fingerprints for a DataFrame of SMILES strings using RDKit's MorganGenerator.
+    
+    Args:
+        df (pd.DataFrame): Input DataFrame containing SMILES.
+        smiles_col (str): Column name that has the SMILES strings.
+        radii (tuple): Radii for Morgan fingerprints.
+        n_bits (int): Length of fingerprint bit vector.
+    
+    Returns:
+        pd.DataFrame: Concatenated DataFrame of fingerprints.
+    """
+    fps_dfs = []
+
+    for radius in radii:
+        gen = GetMorganGenerator(radius=radius, fpSize=n_bits)
+        fps = []
+        for smi in df[smiles_col]:
+            mol = Chem.MolFromSmiles(smi)
+            if mol:
+                fp = gen.GetFingerprint(mol)  # returns ExplicitBitVect
+                fps.append(list(fp))
+            else:
+                fps.append([0] * n_bits)  # fallback for invalid SMILES
+        
+        fps_df = pd.DataFrame(fps, columns=[f"MorganFP_{i}/r{radius}" for i in range(n_bits)])
+        fps_dfs.append(fps_df)
+    
+    return pd.concat([df.reset_index(drop=True)] + fps_dfs, axis=1)
+
+
 def df2cleandf(df: pd.DataFrame,
                smi_col_name: str = 'SMILES',
                target_col: str = 'LogPapp Value',
                target_col_rename: str = 'logPapp_Values_list',
                mean_col_name: str = 'Mean_logPapp_Values',
                std_col_name: str = 'logPapp_Values_Std',
+               columns_to_list: List[str] = [],
                data_split: bool = True,
                train_idx: Union[list, tuple, np.ndarray] = [],
                val_idx: Union[list, tuple, np.ndarray] = [],
@@ -1129,28 +1376,44 @@ def df2cleandf(df: pd.DataFrame,
     Input: A dataframe containing SMILES and LogPapp Value columns
     Output: A cleaned and featured dataframe
     '''
+    df_grouped = df[[smi_col_name, target_col]].copy()
+    df_grouped['Cannonicalized_SMILES'] = df['Cannonicalized_SMILES'] = df[smi_col_name].apply(canonicalize_smiles)
+    if columns_to_list:
+        for col in columns_to_list:
+            df_grouped[f'{col.replace(' ', '_')}_list'] = df['Cannonicalized_SMILES'].map(df.groupby('Cannonicalized_SMILES')[col].apply(list).to_dict())
     
-    df['Cannonicalized_SMILES'] = df[smi_col_name].apply(canonicalize_smiles)
-    mapping = dict(zip(df['Cannonicalized_SMILES'], df[smi_col_name]))
-    df_grouped = df.groupby('Cannonicalized_SMILES')[target_col].apply(list).to_dict()
-    df_grouped_list = pd.DataFrame(list(df_grouped.items()), columns=['Cannonicalized_SMILES', target_col_rename])
-    
-    df_grouped_list.insert(0, smi_col_name, ['Other']*len(df_grouped_list))
-    df_grouped_list[smi_col_name] = df_grouped_list['Cannonicalized_SMILES'].map(mapping)
+    target_col_rename = f'{target_col.replace(' ', '_')}_list'
+    df_grouped[f'{smi_col_name}_list'] = df_grouped['Cannonicalized_SMILES'].map(df_grouped.groupby('Cannonicalized_SMILES')[smi_col_name].apply(list).to_dict())
+    df_grouped[target_col_rename] = df_grouped['Cannonicalized_SMILES'].map(df_grouped.groupby('Cannonicalized_SMILES')[target_col].apply(list).to_dict())
+    df_grouped = df_grouped.drop_duplicates(subset='Cannonicalized_SMILES', keep='first').reset_index(drop=True)
+    df_grouped = df_grouped.drop(columns=[target_col])
+
+    print(f'Number of unique datapoints: {len(df_grouped)}')
+    # mapping = dict(zip(df['Cannonicalized_SMILES'], df[smi_col_name]))
+    # df_grouped = df.groupby('Cannonicalized_SMILES')[target_col].apply(list).to_dict()
+    # df_grouped_smiles = df.groupby('Cannonicalized_SMILES')[smi_col_name].apply(list).to_dict()
+    # df_grouped_list = pd.DataFrame(list(df_grouped.items()), columns=['Cannonicalized_SMILES', target_col_rename])
+    # df_grouped_list_smiles = pd.DataFrame(list(df_grouped_smiles.items()), columns=['Cannonicalized_SMILES', f'{smi_col_name}_list'])
+    # df_grouped_list = pd.merge(df_grouped_list, df_grouped_list_smiles, on='Cannonicalized_SMILES', how='left')
+    # df_grouped_list.insert(0, smi_col_name, ['Other']*len(df_grouped_list))
+    # df_grouped_list[smi_col_name] = df_grouped_list['Cannonicalized_SMILES'].map(mapping)
     
     mean_func = lambda x: sum(x) / len(x) if len(x) > 0 else None
     std_func = lambda x: np.std(x) if len(x) > 0 else None
     
-    df_grouped_list[mean_col_name] = df_grouped_list[target_col_rename].apply(mean_func)
-    df_grouped_list[std_col_name] = df_grouped_list[target_col_rename].apply(std_func)
+    df_grouped[mean_col_name] = df_grouped[target_col_rename].apply(mean_func)
+    df_grouped[std_col_name] = df_grouped[target_col_rename].apply(std_func)
     
-    df_grouped_list_features = df_grouped_list[smi_col_name].apply(mol_to_fetures).tolist()
+    df_grouped_list_features = [None]*len(df_grouped)
+    for i, smi in tqdm(enumerate(df_grouped[smi_col_name]), total=len(df_grouped), desc='Calculating Features:'):
+        df_grouped_list_features[i] = mol_to_fetures(smi)
     df_grouped_list_features = pd.DataFrame(df_grouped_list_features)
     
     # df_grouped_list_features = df_grouped_list_features.dropna(axis=1, how='any')
     df_grouped_list_features = df_grouped_list_features.select_dtypes(include=[np.number])
     
-    df_features = pd.concat([df_grouped_list, df_grouped_list_features], axis=1)
+    # df_grouped = df_grouped[[smi_col_name, 'Cannonicalized_SMILES', f'{smi_col_name}_list', target_col_rename, mean_col_name, std_col_name]]
+    df_features = pd.concat([df_grouped, df_grouped_list_features], axis=1)
     
     if data_split:
         df_features.insert(2, 'Data_Split', ['Other']*len(df_features))
@@ -1473,11 +1736,11 @@ def float_onehot_encodings2smiles(onehot_encodings: np.ndarray[np.bool_],
     return smiles_list
 # #------------------------------------------------------
 
-def nearest_neighbours(model: (nn.Module | RandomForestRegressor),
+def nearest_neighbours_smiles(model: (nn.Module | RandomForestRegressor),
                        X_train: (pd.DataFrame | torch.Tensor),
-                       X_rr: (pd.DataFrame | torch.Tensor),
+                       X_test: (pd.DataFrame | torch.Tensor),
                        y_train: (pd.DataFrame | torch.Tensor),
-                       y_rr: (pd.DataFrame | torch.Tensor),
+                       y_test: (pd.DataFrame | torch.Tensor),
                        smiles_list_rr: Any,
                        smiles_list_train: Any,
                        n_neighbors: int = 1,
@@ -1487,6 +1750,7 @@ def nearest_neighbours(model: (nn.Module | RandomForestRegressor),
                        similarity_metric: str = 'Tanimoto',
                        device: str = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
                        ) -> Tuple[List[str], List[str], pd.DataFrame]:
+    
     predicted_rr = []
     n_neighbour_original = []
     n_neighbour_predicted = []
@@ -1506,14 +1770,14 @@ def nearest_neighbours(model: (nn.Module | RandomForestRegressor),
     legends = []
     fps_result = defaultdict(list)
 
-    for i in tqdm(range(X_rr.shape[0])):
+    for i in tqdm(range(X_test.shape[0])):
                 
         if isinstance(model, nn.Module):
             # Build the KDTree
             nn_tree = NearestNeighbors(n_neighbors=n_neighbors, algorithm='kd_tree')
             nn_tree.fit(X_train)
             
-            target_point = X_rr[i]
+            target_point = X_test[i]
             ind = nn_tree.kneighbors(X = target_point.reshape(1, -1), n_neighbors=n_neighbors, return_distance=False)
             nn_idx = ind.item()
             nearest_point = X_train[nn_idx]
@@ -1525,8 +1789,15 @@ def nearest_neighbours(model: (nn.Module | RandomForestRegressor),
         
         elif isinstance(model, (RandomForestClassifier, RandomForestRegressor, SVC, SVR)):
             
+            if not isinstance(X_train, pd.DataFrame):
+                X_train = pd.DataFrame(X_train)
+                # y_train = pd.DataFrame(y_train)
+            if not isinstance(X_test, pd.DataFrame):
+                X_test = pd.DataFrame(X_test)
+                # y_test = pd.DataFrame(y_test)
+            
             # Build the KDTree
-            target_point = X_rr.iloc[i].values.reshape(1, -1)
+            target_point = X_test.iloc[i].values.reshape(1, -1)
             nn_tree = NearestNeighbors(n_neighbors=n_neighbors, algorithm='kd_tree').fit(X_train)
             target_point = pd.DataFrame(target_point, columns=X_train.columns)
             
@@ -1541,14 +1812,14 @@ def nearest_neighbours(model: (nn.Module | RandomForestRegressor),
         else:
             raise TypeError( 'Model type unknown. Expected a neural network or random forest model.')
             
-        if isinstance(y_rr, pd.core.series.Series):
-            y_rr = y_rr.to_numpy()
+        if isinstance(y_test, pd.core.series.Series):
+            y_test = y_test.to_numpy()
         if isinstance(y_train, pd.core.series.Series):
             y_train = y_train.to_numpy()  
             
         predicted_rr.append(round(rr_point_pred_val.item(), 4))
         n_neighbour_predicted.append(round(near_pts_pred_val.item(), 4))
-        original_rr.append(round(y_rr[i].item(), 4))
+        original_rr.append(round(y_test[i].item(), 4))
         n_neighbour_original.append(round(y_train[nn_idx].item(), 4))
         
         smi_list_rr_then_train.append(smiles_list_rr[i])
@@ -1595,10 +1866,10 @@ def nearest_neighbours(model: (nn.Module | RandomForestRegressor),
             for key, value in fps_dict.items():
                 fps_result[key].append(value)
 
-    df = pd.DataFrame({'Independent SMILES': smi_list_rr,
+    df = pd.DataFrame({'SMILES': smi_list_rr,
                        'Nearest SMILES': smi_list_train,
-                       'Independent Original': original_rr,
-                       'Independent Predicted': predicted_rr,
+                       'Target Original': original_rr,
+                       'Target Predicted': predicted_rr,
                        'NN Original': n_neighbour_original,
                        'NN Predicted': n_neighbour_predicted,
                        **fps_result
@@ -1606,3 +1877,134 @@ def nearest_neighbours(model: (nn.Module | RandomForestRegressor),
         
     
     return smi_list_rr_then_train, legends, df
+
+
+# def nearest_neighbours_smiles(
+#     model: (nn.Module | RandomForestRegressor),
+#     X_train: (pd.DataFrame | torch.Tensor),
+#     X_test: (pd.DataFrame | torch.Tensor),
+#     y_train: (pd.DataFrame | torch.Tensor),
+#     y_test: (pd.DataFrame | torch.Tensor),
+#     smiles_list_rr: Any,
+#     smiles_list_train: Any,
+#     n_neighbors: int = 1,
+#     check_fingerprint: bool = False,
+#     fingerprint_names: Any = ['RDKit', 'Pattern', 'TopologicalTorsion', 'MACCSKeys', 'Morgan', 'AtomPair'],
+#     distance_metric: str = 'Euclidean',
+#     similarity_metric: str = 'Tanimoto',
+#     device: str = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+# ) -> Tuple[List[str], List[str], pd.DataFrame]:
+
+#     # --- Convert inputs ---
+#     if isinstance(y_test, pd.Series): 
+#         y_test = y_test.to_numpy()
+#     if isinstance(y_train, pd.Series): 
+#         y_train = y_train.to_numpy()
+
+#     if isinstance(model, (RandomForestClassifier, RandomForestRegressor, SVC, SVR)):
+#         if not isinstance(X_train, pd.DataFrame):
+#             X_train = pd.DataFrame(X_train)
+#         if not isinstance(X_test, pd.DataFrame):
+#             X_test = pd.DataFrame(X_test, columns=X_train.columns)
+
+#     # --- Build KDTree once ---
+#     nn_tree = NearestNeighbors(n_neighbors=n_neighbors, algorithm='kd_tree').fit(X_train)
+
+#     # --- Query all test points at once ---
+#     distances, indices = nn_tree.kneighbors(X_test, n_neighbors=n_neighbors, return_distance=True)
+
+#     # --- Collect nearest neighbors ---
+#     nn_indices = indices[:, 0]   # take first neighbor
+#     nearest_points = (X_train.iloc[nn_indices].values if isinstance(X_train, pd.DataFrame) else X_train[nn_indices])
+#     target_points = (X_test.values if isinstance(X_test, pd.DataFrame) else X_test)
+
+#     # --- Predict in batch ---
+#     if isinstance(model, nn.Module):
+#         model = model.to(device)
+#         target_tensor = torch.tensor(target_points, dtype=torch.float).to(device)
+#         neighbor_tensor = torch.tensor(nearest_points, dtype=torch.float).to(device)
+
+#         rr_point_pred_val = model(target_tensor).cpu().detach().numpy()
+#         near_pts_pred_val = model(neighbor_tensor).cpu().detach().numpy()
+
+#     else:  # Sklearn model
+#         rr_point_pred_val = model.predict(target_points)
+#         near_pts_pred_val = model.predict(nearest_points)
+
+#     # --- Round + Collect results ---
+#     predicted_rr = np.round(rr_point_pred_val.flatten(), 4).tolist()
+#     n_neighbour_predicted = np.round(near_pts_pred_val.flatten(), 4).tolist()
+#     original_rr = np.round(y_test.flatten(), 4).tolist()
+#     n_neighbour_original = np.round(y_train[nn_indices].flatten(), 4).tolist()
+
+#     # --- Build SMILES + Legends ---
+#     smi_list_rr = [smiles_list_rr[i] for i in range(len(X_test))]
+#     smi_list_train = [smiles_list_train[idx] for idx in nn_indices]
+
+#     smi_list_rr_then_train = []
+#     legends = []
+#     for i in range(len(smi_list_rr)):
+#         smi_list_rr_then_train.append(smi_list_rr[i])
+#         legends.append(f'T:{original_rr[i]}-P:{predicted_rr[i]}(In)')
+
+#         smi_list_rr_then_train.append(smi_list_train[i])
+#         legends.append(f'T:{n_neighbour_original[i]}-P:{n_neighbour_predicted[i]}(Tr)')
+
+#     fps_result = defaultdict(list)
+
+#     # --- Fingerprint similarity (still needs loop) ---
+#     if check_fingerprint:
+#         for i, smi in enumerate(smi_list_rr):
+#             fps_dict = OrderedDict({})
+#             for name in fingerprint_names:
+#                 smiles_sim, _ = closest_neighbour_smiles(
+#                     smi, smiles_list_train,
+#                     fingerprint_name=name,
+#                     distance_metric=distance_metric,
+#                     similarity_metric=similarity_metric
+#                 )
+#                 smi_list_rr_then_train.append(smiles_sim)
+#                 idx = list(smiles_list_train).index(smiles_sim)
+
+#                 sim_point = (X_train.iloc[idx].values.reshape(1, -1) 
+#                              if isinstance(X_train, pd.DataFrame) 
+#                              else X_train[idx].reshape(1, -1))
+
+#                 if isinstance(model, nn.Module):
+#                     pred_val = model(torch.tensor(sim_point, dtype=torch.float).to(device)).item()
+#                 else:
+#                     pred_val = model.predict(sim_point).item()
+
+#                 true_val = y_train[idx].item()
+#                 legends.append(f'T:{round(true_val,4)}-P:{round(pred_val,4)}({name})')
+#                 fps_dict[name] = smiles_sim
+
+#             for key, value in fps_dict.items():
+#                 fps_result[key].append(value)
+
+#     # --- Build DataFrame ---
+#     df = pd.DataFrame({
+#         'SMILES': smi_list_rr,
+#         'Nearest SMILES': smi_list_train,
+#         'Target Original': original_rr,
+#         'Target Predicted': predicted_rr,
+#         'NN Original': n_neighbour_original,
+#         'NN Predicted': n_neighbour_predicted,
+#         **fps_result
+#     })
+
+#     return smi_list_rr_then_train, legends, df
+
+
+def nearest_neighbours(X_train, X_query, n_neighbors=1):
+    
+    nn_tree = NearestNeighbors(n_neighbors=n_neighbors, algorithm='kd_tree')
+    nn_tree.fit(X_train)
+    distances, indices = nn_tree.kneighbors(X_query, n_neighbors=n_neighbors)
+    indices = indices[:, 0]
+    
+    return indices, distances, nn_tree
+    
+
+
+
