@@ -177,7 +177,6 @@ __all__ = [
 ]
     
     
-# Showing the images:-
 def show_img(img):
 
     [display(x) for x in img]
