@@ -294,11 +294,14 @@ class Trainer_functions:
         y_pred = []
         y_true = []
         epoch_test_loss = 0
+        model_params = get_func_input_names(model.forward)
 
         with torch.no_grad():  # No need to compute gradients during evaluation
             for batch in tqdm(test_loader, desc=description):
-                batch = {k: v.to(device) for k, v in batch.items()}
-                targets = batch.pop(targets_col)
+                targets = batch.pop(targets_col).to(device)
+                batch = {k: batch[k].to(device) for k in model_params}
+                # batch = {k: v.to(device) for k, v in batch.items()}
+                # targets = batch.pop(targets_col)
                 outputs = model(**batch)
                 loss = criterion(input=outputs.reshape(targets.shape).type(torch.float32), target=targets.type(torch.float32)).type(torch.float32)
                     
@@ -503,6 +506,7 @@ class Trainer_functions:
                     time: str = datetime_now(path=False)[2],
                     save_model: bool = True,
                     device: Any = torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
+                    collate_fn = None
                     ) -> tuple[List[float], nn.Module]:
         
         """
@@ -626,10 +630,11 @@ class Trainer_functions:
         model_acc = -float('inf')
         model_loss = float('inf')
         
-        train_loader_subset, _ = subset_loader(train_loader, batch_size=batch_size, subset_ratio=subset_ratio)
-        test_loader_subset, _ = subset_loader(test_loader, batch_size=batch_size, subset_ratio=subset_ratio)
-        val_loader_subset, _ = subset_loader(val_loader, batch_size=batch_size, subset_ratio=subset_ratio)
-        
+        # if subset_ratio < 1:
+        train_loader_subset, _ = subset_loader(train_loader, batch_size=batch_size, subset_ratio=subset_ratio, collate_fn=collate_fn)
+        test_loader_subset, _ = subset_loader(test_loader, batch_size=batch_size, subset_ratio=subset_ratio, collate_fn=collate_fn)
+        val_loader_subset, _ = subset_loader(val_loader, batch_size=batch_size, subset_ratio=subset_ratio, collate_fn=collate_fn)
+
         print('+'*70)
         print(f'Number of Test-Train Samples: {len(train_loader_subset.dataset)}')
         print(f'Number of Test-Val Samples: {len(val_loader_subset.dataset)}')
@@ -957,7 +962,7 @@ class Trainer_functions:
             None. Saves a `.pt` checkpoint file to disk.
         """
         network_save_filename = ''.join([network_save_filename, '.pt'])
-        # print(f'Saving network in: "{network_save_filename}')
+        print(f'Saving network in: "{network_save_filename}')
         
         source_file = os.path.abspath(__file__)
         with open(source_file, 'rb') as fp:

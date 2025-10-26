@@ -1,4 +1,5 @@
 import re
+import io
 import os
 import ast
 import math
@@ -58,6 +59,7 @@ __all__ = [
     'visualize_all_morgan_fps',
     'visualize_morgan_fp_bits',
     
+    'df_group_duplicates',
     'df2cleandf',
     'modify_df1_wrt_df2',
     
@@ -98,7 +100,7 @@ __all__ = [
            
             
 def canonicalize_smiles(smiles: str,
-                        isomericSmiles: bool = False
+                        isomericSmiles: bool = True
                         ) -> (str | None):
     
     '''
@@ -284,17 +286,68 @@ def draw_molecule(smiles: str,
     return img
 
 
+def mol_to_image_with_font(mol, size=(400, 400), atom_font_size=18, bond_line_width=4, dots_per_angstrom=None):
+    """
+    Return a PIL.Image of `mol` drawn with RDKit's MolDraw2DCairo while setting atom label font size.
+    atom_font_size should be an integer (point size).
+    """
+    try:
+        w, h = size
+        drawer = rdMolDraw2D.MolDraw2DCairo(w, h)
+        draw_options = drawer.drawOptions()
+
+        # Important settings
+        drawer.SetFontSize(int(atom_font_size))
+        # draw_options.atomLabelFontSize = int(atom_font_size)   # integer point size
+        draw_options.bondLineWidth = bond_line_width           # thicker bonds if desired
+        draw_options.minFontSize = atom_font_size
+        draw_options.maxFontSize = atom_font_size+5
+        draw_options.scaleBondWidth = True
+        draw_options.annotationFontScale = 5.0
+
+        if dots_per_angstrom is not None:
+            try:
+                draw_options.dotsPerAngstrom = float(dots_per_angstrom)
+            except Exception:
+                pass
+
+        # Draw and return PIL image
+        drawer.DrawMolecule(mol)
+        drawer.FinishDrawing()
+        png = drawer.GetDrawingText()
+        # GetDrawingText may return str or bytes depending on RDKit build; normalize to bytes
+        if isinstance(png, str):
+            png = png.encode("utf-8")
+        return Image.open(io.BytesIO(png))
+    except Exception as exc:
+        # fall back to the simpler MolToImage if Cairo isn't available or something else fails
+        print("Warning: MolDraw2DCairo unavailable/failed (falling back). Error:", exc)
+        return Draw.MolToImage(mol, size=size)
+
+def fig_to_image(fig, dpi=100):
+    import io
+    from PIL import Image
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
+    buf.seek(0)
+    img = Image.open(buf)
+    return img
+
 def plot_smiles_grid(smiles_list: List[str],
                      legends: List[str]=None,
                      titles: List[str]=None,
                      cols: int = 8,
-                     image_size: Tuple[int] = (400, 400),
-                     figsize: Tuple[int] = (24, 12),
+                     image_size: Tuple[int,int] = (400, 400),
+                     figsize: Tuple[int,int] = (24, 12),
                      legendfontsize: int = 12,
                      savepath: str = '',
                      suptitle: str = '',
                      caption: str = '',
-                     row_lines: bool = True
+                     row_lines: bool = True,
+                     atom_font_size: int = 18,
+                     dots_per_angstrom: float = None,
+                     bond_line_width: float = 4,
+                     show=False
                      ) -> None:
     """
     Create a grid plot of molecules from SMILES strings.
@@ -309,36 +362,38 @@ def plot_smiles_grid(smiles_list: List[str],
         suptitle (str): Title for the entire figure.
         caption (str): Caption for the entire figure.
     """
-    titlefontsize=legendfontsize +2
+    titlefontsize = legendfontsize + 2
     num_molecules = len(smiles_list)
     rows = math.ceil(num_molecules / cols)
     fig, axs = plt.subplots(rows, cols, figsize=figsize)
 
-    # If there's only one row/col, axs won't be 2D
-    axs = axs.flatten() if isinstance(axs, (list, np.ndarray)) else [axs]
+    # Normalize axs to a flat list
+    axs = np.atleast_1d(axs).reshape(-1)
 
     for i, ax in enumerate(axs):
         if i < num_molecules:
             smiles = smiles_list[i]
             mol = Chem.MolFromSmiles(smiles)
             if mol:
-                img = Draw.MolToImage(mol, size=image_size)
+                img = mol_to_image_with_font(mol,
+                                             size=image_size,
+                                             atom_font_size=atom_font_size,
+                                             dots_per_angstrom=dots_per_angstrom,
+                                             bond_line_width=bond_line_width
+                                             )
                 ax.imshow(img)
-
-                # Add per-molecule title above
-                if titles:
-                    ax.set_title(titles[i], fontsize=titlefontsize)#, pad=10)
-
-                # Add per-molecule caption below
-                if legends:
-                    ax.text(0.5, -0.15, legends[i], fontsize=legendfontsize, 
+                # Titles and legends
+                if titles and i < len(titles) and titles[i]:
+                    ax.set_title(titles[i], fontsize=titlefontsize)
+                if legends and i < len(legends) and legends[i]:
+                    ax.text(0.5, -0.12, legends[i], fontsize=legendfontsize,
                             ha="center", va="center", transform=ax.transAxes)
             else:
-                ax.text(0.5, 0.5, 'Invalid SMILES', 
+                ax.text(0.5, 0.5, 'Invalid SMILES',
                         ha='center', va='center', fontsize=12)
-        ax.axis('off')  # Hide axes
+        ax.axis('off')
 
-    # # Hide unused axes
+    # Hide unused axes
     for j in range(num_molecules, rows * cols):
         axs[j].axis('off')
 
@@ -348,25 +403,105 @@ def plot_smiles_grid(smiles_list: List[str],
     if caption:
         plt.figtext(0.5, -0.02, caption, wrap=True, ha="center", fontsize=12)
 
-    plt.tight_layout(rect=[0, 0, 1, 0.95])  # leave space for suptitle + caption
-    plt.grid()
-    # for r in range(1, rows):
-    #     # get bottom of this row
-    #     y = axs[r].get_position().y0  
-    #     fig.add_artist(plt.Line2D([0.02, 0.98], [y, y], transform=fig.transFigure,
-    #                           color="black", lw=1, alpha=0.6))
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
     if row_lines and rows > 1:
         for r in range(rows):
-            y =0.95- ((r / rows)*0.95)
+            y = 0.95 - ((r / rows) * 0.95)
             fig.add_artist(plt.Line2D([0.02, 0.98], [y, y], color="black", lw=1, alpha=0.5, transform=fig.transFigure))
 
     if savepath:
         plt.savefig(savepath, dpi=300, bbox_inches='tight')
         plt.close()
+    elif not show:
+        return fig_to_image(fig, dpi=800)
     else:
         plt.show()
-
         
+# def plot_smiles_grid(smiles_list: List[str],
+#                      legends: List[str]=None,
+#                      titles: List[str]=None,
+#                      cols: int = 8,
+#                      image_size: Tuple[int] = (400, 400),
+#                      figsize: Tuple[int] = (24, 12),
+#                      legendfontsize: int = 12,
+#                      savepath: str = '',
+#                      suptitle: str = '',
+#                      caption: str = '',
+#                      row_lines: bool = True
+#                      ) -> None:
+#     """
+#     Create a grid plot of molecules from SMILES strings.
+
+#     Parameters:
+#         smiles_list (list of str): List of SMILES strings.
+#         legends (list of str, optional): Captions below each molecule.
+#         titles (list of str, optional): Titles above each molecule.
+#         cols (int): Number of columns in the grid.
+#         image_size (tuple): Size of each image (width, height).
+#         figsize (tuple): Overall size of the grid figure (width, height).
+#         suptitle (str): Title for the entire figure.
+#         caption (str): Caption for the entire figure.
+#     """
+#     titlefontsize=legendfontsize +2
+#     num_molecules = len(smiles_list)
+#     rows = math.ceil(num_molecules / cols)
+#     fig, axs = plt.subplots(rows, cols, figsize=figsize)
+
+#     # If there's only one row/col, axs won't be 2D
+#     axs = axs.flatten() if isinstance(axs, (list, np.ndarray)) else [axs]
+
+#     for i, ax in enumerate(axs):
+#         if i < num_molecules:
+#             smiles = smiles_list[i]
+#             mol = Chem.MolFromSmiles(smiles)
+#             if mol:
+#                 options = Draw.rdMolDraw2D.MolDrawOptions()
+#                 options.prepareMolsForDrawing = True
+#                 options.fillHighlights = True
+#                 options.legendFontSize = 30
+#                 options.atomLabelFontSize = 5.0
+#                 options.bondLineWidth = 10
+                
+#                 img = Draw.MolToImage(mol, size=image_size, drawOptions=options)
+#                 ax.imshow(img)
+
+#                 # Add per-molecule title above
+#                 if titles:
+#                     ax.set_title(titles[i], fontsize=titlefontsize)#, pad=10)
+
+#                 # Add per-molecule caption below
+#                 if legends:
+#                     ax.text(0.5, -0.15, legends[i], fontsize=legendfontsize, 
+#                             ha="center", va="center", transform=ax.transAxes)
+#             else:
+#                 ax.text(0.5, 0.5, 'Invalid SMILES', 
+#                         ha='center', va='center', fontsize=12)
+#         ax.axis('off')  # Hide axes
+
+#     # # Hide unused axes
+#     for j in range(num_molecules, rows * cols):
+#         axs[j].axis('off')
+
+#     if suptitle:
+#         plt.suptitle(suptitle, fontsize=20, fontweight='bold')
+
+#     if caption:
+#         plt.figtext(0.5, -0.02, caption, wrap=True, ha="center", fontsize=12)
+
+#     plt.tight_layout(rect=[0, 0, 1, 0.95])  # leave space for suptitle + caption
+#     plt.grid()
+      
+#     if row_lines and rows > 1:
+#         for r in range(rows):
+#             y =0.95- ((r / rows)*0.95)
+#             fig.add_artist(plt.Line2D([0.02, 0.98], [y, y], color="black", lw=1, alpha=0.5, transform=fig.transFigure))
+
+#     if savepath:
+#         plt.savefig(savepath, dpi=300, bbox_inches='tight')
+#         plt.close()
+#     else:
+#         plt.show()
+
         
 def draw_mol_grid_with_legends(smiles_list: List[str],
                                legends: List[str],
@@ -749,7 +884,7 @@ def visualize_all_morgan_fps(smiles:str,
             useSVG=False,
             aromaticColor=(0.1, 1, 1),
             ringColor=(1, 0.1, 1),
-            centerColor=(1, 1, 0),
+            centerColor=(1, 0, 0),
             extraColor=(0.9, 0.9, 0.9),
             drawOptions=options
         )
@@ -803,7 +938,7 @@ def visualize_morgan_fp_bits(bit_indices: List[int],
             useSVG=False,
             aromaticColor=(0.1, 1, 1),
             ringColor=(1, 0.1, 1),
-            centerColor=(1, 1, 0),
+            centerColor=(1, 0, 0),
             extraColor=(0.9, 0.9, 0.9),
             drawOptions=options
         )
@@ -1111,52 +1246,54 @@ def mol_to_fetures_with_descriptor_function(smile: str,
     Input: A SMILES
     Output: All descriptors calculated from that smiles using different libraries.
     '''
-    
-    # Step 1: Convert SMILES to RDKit Mol object
-    mol = Chem.MolFromSmiles(smile)
+    try:
+        # Step 1: Convert SMILES to RDKit Mol object
+        mol = Chem.MolFromSmiles(smile)
 
-    # Step 2: Initialize Mordred Calculator to compute all descriptors
-    calc = Calculator(descriptors, ignore_3D=True)
+        # Step 2: Initialize Mordred Calculator to compute all descriptors
+        calc = Calculator(descriptors, ignore_3D=True)
 
-    # Step 3: Compute Mordred descriptors (physicochemical, MOE-type, Kappa, etc.)
-    desc_values = calc(mol)
+        # Step 3: Compute Mordred descriptors (physicochemical, MOE-type, Kappa, etc.)
+        desc_values = calc(mol)
 
-    # Collect the Mordred descriptors
-    mordred_descriptors = {desc: value for desc, value in desc_values.items()}
+        # Collect the Mordred descriptors
+        mordred_descriptors = {desc: value for desc, value in desc_values.items()}
 
-    # Step 4: Compute RDKit-based physicochemical properties (e.g., molecular weight, LogP, TPSA)
-    rdkit_properties = {}
-    # for name, func in Descriptors._descList:
-    for name, func in Descriptors.__dict__.items():
-        if callable(func):
-            try:
-                rdkit_properties[name] = func(mol)
-                '''TPSA: Calculated using the formula: TPSA = 60.0 * (NHOH + NNH) + 20.0 * NOH
-                Whereas, TopoPSA: Calculated using the formula: TopoPSA = 60.0 * (NHOH + NNH) + 20.0 * NOH + 10.0 * (NCO + NOC) + 5.0 * (NNO + NNN)
-                '''
-            except:# Exception as e:
-                pass
+        # Step 4: Compute RDKit-based physicochemical properties (e.g., molecular weight, LogP, TPSA)
+        rdkit_properties = {}
+        # for name, func in Descriptors._descList:
+        for name, func in Descriptors.__dict__.items():
+            if callable(func):
+                try:
+                    rdkit_properties[name] = func(mol)
+                    '''TPSA: Calculated using the formula: TPSA = 60.0 * (NHOH + NNH) + 20.0 * NOH
+                    Whereas, TopoPSA: Calculated using the formula: TopoPSA = 60.0 * (NHOH + NNH) + 20.0 * NOH + 10.0 * (NCO + NOC) + 5.0 * (NNO + NNN)
+                    '''
+                except:# Exception as e:
+                    pass
 
-    # Step 5: Compute Morgan fingerprints
-    radius = 2  # Set radius for Morgan fingerprint
-    nBits = 1024  # Set number of bits for the fingerprint
-    # morgan_fp = AllChem.GetMorganFingerprintAsBitVect(mol, radius, nBits=nBits)
-    # Initialize the MorganGenerator
-    morgan_generator = GetMorganGenerator(radius=radius, fpSize=nBits)
-    morgan_fp = morgan_generator.GetFingerprint(mol)
+        # Step 5: Compute Morgan fingerprints
+        radius = 2  # Set radius for Morgan fingerprint
+        nBits = 1024  # Set number of bits for the fingerprint
+        # morgan_fp = AllChem.GetMorganFingerprintAsBitVect(mol, radius, nBits=nBits)
+        # Initialize the MorganGenerator
+        morgan_generator = GetMorganGenerator(radius=radius, fpSize=nBits)
+        morgan_fp = morgan_generator.GetFingerprint(mol)
 
-    # Convert Morgan fingerprints to a dictionary
-    morgan_fp_dict = {f'MorganFP_{i}': int(bit) for i, bit in enumerate(morgan_fp)}
-    
-    # 3D descriptors
-    descriptors_3d = compute_all_3d_descriptors(smile)
+        # Convert Morgan fingerprints to a dictionary
+        morgan_fp_dict = {f'MorganFP_{i}': int(bit) for i, bit in enumerate(morgan_fp)}
+        
+        # 3D descriptors
+        descriptors_3d = compute_all_3d_descriptors(smile)
 
-    # Step 6: Combine all descriptors into one dictionary
-    all_descriptors = {**rdkit_properties, **mordred_descriptors, **morgan_fp_dict, **descriptors_3d}
-    
-    names2descriptors = None
-    if flag_name2descriptor:
-        names2descriptors = {str(k):k for k in all_descriptors.keys()}
+        # Step 6: Combine all descriptors into one dictionary
+        all_descriptors = {**rdkit_properties, **mordred_descriptors, **morgan_fp_dict, **descriptors_3d}
+        
+        names2descriptors = None
+        if flag_name2descriptor:
+            names2descriptors = {str(k):k for k in all_descriptors.keys()}
+    except:
+        pass
     
     return all_descriptors, names2descriptors
 
@@ -1357,6 +1494,25 @@ def smiles_to_morgan_fps(df: pd.DataFrame, smiles_col: str = "smiles", radii=(0,
         fps_dfs.append(fps_df)
     
     return pd.concat([df.reset_index(drop=True)] + fps_dfs, axis=1)
+
+def df_group_duplicates(df: pd.DataFrame,
+                        reference_col: str,
+                        target_cols: List[str],
+                        keep_old_cols: bool = True,
+                        drop_duplicates:bool = True
+                        ) -> pd.DataFrame:
+    
+    if keep_old_cols:
+        df_grouped = df[[reference_col, *target_cols]].copy()
+    else:
+        df_grouped = df[[reference_col]].copy()
+        
+    for col in target_cols:
+        df_grouped[f'{col.replace(' ', '_')}_list'] = df[reference_col].map(df.groupby(reference_col)[col].apply(list).to_dict())
+    if drop_duplicates:
+        df_grouped = df_grouped.drop_duplicates(subset=reference_col, keep='first').reset_index(drop=True)
+
+    return df_grouped
 
 
 def df2cleandf(df: pd.DataFrame,

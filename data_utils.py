@@ -62,6 +62,27 @@ sys.path.append(os.path.join(RDConfig.RDContribDir, 'SA_Score'))
 import sascorer
 #################################################################################################
 
+__all__ = [
+    'mol_to_fetures',
+    'classify_acid_base',
+    'MolFingerprint',
+    'tensor_data_loader',
+    'PARSE_SMILES',
+    'PARSE_MASSSPEC',
+    'random_neighbour_samples',
+    'DrawMassSpecMatchedMolecules',
+    'plot_data_embedding',
+    'data_2D_embedding',
+    'data_partition_train_val_test_smiles',
+    'similarity_smiles_tanimoto',
+    'find_continous_nonzeros_pos_1Darray',
+    'remove_uniform_image_border',
+    'plot_embedded_smiles_string',
+    'plot_embedded_smiles_images',
+    'execution_time',
+    'qed_sas_logp_mass',
+    'main'
+]
 
 def mol_to_fetures(smile):
     
@@ -1180,6 +1201,7 @@ def line_count_csv_file(filename, chunksize=1000):
             
     return count
 
+
 def find_continous_nonzeros_pos_1Darray(row_sum):
     
     non_zeros_ids = np.where(row_sum)[0]
@@ -1267,8 +1289,8 @@ def plot_embedded_smiles_string(x, y, smiles, embedding_method, fig_size=(600, 6
     fig.yaxis.axis_label = ''.join([embedding_method, ' 2nd comp'])
 
     show(fig)
-    
-    
+
+
 def plot_embedded_smiles_images(x, y, smiles, embedding_method, flag_smiles_images=0, smiles_images_path='smiles_images/', fig_size=(700, 700), circle_size=3, title='Embedded smiles images plot', plot_subimg_size=(300, 300), image_format='png', image_save_filename=[], colors=['dodgerblue'], legend=[]):
     
     if not isinstance(circle_size, list):
@@ -1356,8 +1378,6 @@ def qed_sas_logp_mass(smiles):
     mol_mass = PARSE_SMILES.mol_prop_mass(smiles)
 
     return torch.tensor([qed, sas, logP, mol_mass])
-    
-    
    
 def main(smiles):
     '''main method.'''

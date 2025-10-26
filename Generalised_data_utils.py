@@ -3,6 +3,7 @@ import os
 import ast
 import sys
 import csv
+import gzip
 import pytz
 import shap
 import copy
@@ -50,6 +51,9 @@ import torch
 import torch.nn as nn
 from IPython.display import display
 from torch.utils.data import DataLoader, Subset
+from torch_geometric.data import DataLoader as PyGDataLoader
+# sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../')))
+# sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 __all__ = [
     'show_img',
@@ -75,6 +79,7 @@ __all__ = [
     'create_file',
     'create_temp_config',
     'create_folder',
+    'attach_ids',
     'list2json',
     'dict2json',
     'load_json',
@@ -164,6 +169,7 @@ __all__ = [
     'plot_multiple_hist',
     'plot_hist_compair',
     'dist_hist_comparison',
+    'plot_stacked_bars',
     
     'percentage_within_fold_change',
     'geometric_mean_fold_error',
@@ -257,7 +263,7 @@ def get_scale_power(value: float) -> int:
         int: The scale as a power of 10.
     """
     if value == 0:
-        return float('-inf')  # Logarithmically undefined scale
+        return -1e15#float('-inf')  # Logarithmically undefined scale
     abs_value = abs(value)
     log_value = math.log10(abs_value)
     powerof10 = int(math.floor(log_value))
@@ -382,7 +388,7 @@ def collect_class_definitions(self):
     return "\n".join(definitions)
 
 
-def python_object_size(obj: Union[str, Any], use_deep_size: bool = False) -> str:
+def python_object_size(obj: Union[str, Any], use_deep_size: bool = True) -> str:
     """
     Get the size of a file or Python object in a human-readable format.
 
@@ -426,6 +432,14 @@ def create_folder(folder_name: str) -> str:
             os.makedirs(folder_name)
         
     return folder_name
+
+def attach_ids(df, prefix, id_col='UNIQUE_ID'):
+    df = df.copy()
+    width = get_scale_power(len(df)) + 3
+    if id_col not in df.columns:
+        df.insert(0, id_col, 'NA')
+    df[id_col] = [f"{prefix}{i:0{width}d}" for i in range(1, len(df) + 1)]
+    return df
 
 def create_file(folder_path, file_name = ''):
     
@@ -497,12 +511,12 @@ def load_json(path):
 
     return data
 
-def dict2json(dict_, filename='untitled', filepath='./'):
+def dict2json(dict_, filepath='./'):
     
     # with open(f'{filepath}/{filename}.json', 'w') as json_file:
     #     json.dump(json_str, json_file, indent=4)#, cls=NumpyJSONEncoder)
     json_str = json.dumps(dict_, indent=4)
-    with open(f'{filepath}/{filename}.json', "w") as f:
+    with open(filepath, "w") as f:
         f.write(json_str)
 
 def savedict2json(data: dict, path: str):
@@ -552,21 +566,37 @@ def save_list2json(file_: list,
             
     return file_
 
-def save2pickle(file_: object, filepath: str):
-    
-    with open(filepath, 'wb') as fp:
-        pickle.dump(file_, fp)
-        
-    
+def save2pickle(file_: object, filepath: str, compress: bool = False):
+    """
+    Save Python object to a pickle file.
+    If compress=True, saves in gzip format (regardless of extension).
+    """
+    if compress or filepath.endswith(".gz"):
+        with gzip.open(filepath, "wb") as fp:
+            pickle.dump(file_, fp, protocol=pickle.HIGHEST_PROTOCOL)
+    else:
+        with open(filepath, "wb") as fp:
+            pickle.dump(file_, fp, protocol=pickle.HIGHEST_PROTOCOL)
+
+
 def load_from_pickle(filepath: str):
+    """
+    Load Python object from a pickle file.
+    Automatically detects gzip compression (even without .gz extension).
+    """
+    with open(filepath, "rb") as f:
+        magic = f.read(2)
     
-    with open(filepath, 'rb') as fp:
-        file_ = pickle.load(fp)
-        
+    if magic == b"\x1f\x8b":  # gzip magic number
+        with gzip.open(filepath, "rb") as fp:
+            file_ = pickle.load(fp)
+    else:
+        with open(filepath, "rb") as fp:
+            file_ = pickle.load(fp)
     return file_
 
 
-def read_data_from_excel(file_path: str, sheet_num: int = 0):
+def read_data_from_excel(file_path: str, sheet_num: int = None):
     
     # To read all sheets into a dictionary of DataFrames
     sheets_dict = pd.read_excel(file_path, sheet_name=None)
@@ -576,10 +606,13 @@ def read_data_from_excel(file_path: str, sheet_num: int = 0):
     for sheet_name in sheets_dict.keys():
         sheets.append(sheet_name)
         # dataframes.append(df)  # Display the first few rows of each sheet
-        
-    df = sheets_dict[sheets[sheet_num]]
     
-    return df
+    if not isinstance(sheet_num, int): 
+        print(f'Keys: {list(sheets_dict.keys())}')
+        return sheets_dict
+    else:   
+         return sheets_dict[sheets[sheet_num]]
+    
 
 def save_dict_csv_pandas(dict_name, save_filename='temp_save_filename.csv'):
 
@@ -2333,16 +2366,57 @@ def find_outliers_iqr(df, column):
 
 def plot_distribution_compair(data_list1: List[np.ndarray | list],
                               data_list2: List[np.ndarray | list],
-                              subplot_title: List[str],
+                              subplot_title: List[str] = None,
                               alpha: float = 0.4,
                               figsize: tuple = (12, 12),
                               suptitle: str = 'Suptitle',
                               savepath: str = '',
                               x_lims: tuple | None = None,
-                              ax1_label: str = 'Train Data',
-                              ax2_label: str = 'Independent Data',
+                              ax1_label: str = 'Data - 1',
+                              ax2_label: str = 'Data - 2',
                               ax_label_fontsize: int = 10
                               ) -> None:
+    
+    """
+    Generates a figure with side-by-side Kernel Density Estimate (KDE) plots 
+    for comparing the distributions of paired data sets.
+
+    The function plots the distribution from `data_list1` (e.g., 'Train Data') 
+    against the corresponding distribution from `data_list2` (e.g., 'Independent Data') 
+    for each pair of data arrays/lists. Each subplot includes vertical lines 
+    for mean, median, mode, min, and max values.
+
+    This function requires `matplotlib.pyplot` (as `plt`), `seaborn` (as `sns`), 
+    and a custom `data_stat` function (which must return: min, max, mean, median, 
+    mode, and one ignored value).
+
+    Args:
+        data_list1 (List[np.ndarray | list]): A list of data arrays/lists for the first set (e.g., training data).
+        data_list2 (List[np.ndarray | list]): A list of data arrays/lists for the second set (e.g., independent data), 
+                                                must have the same length as `data_list1`.
+        subplot_title (List[str]): A list of titles for each pair of subplots (e.g., feature names), 
+                                   must have the same length as `data_list1`.
+        alpha (float, optional): Transparency level for the KDE fill. Defaults to 0.4.
+        figsize (tuple, optional): Figure size (width, height). Defaults to (12, 12).
+        suptitle (str, optional): Main title for the entire figure. Defaults to 'Suptitle'.
+        savepath (str, optional): File path to save the figure. If empty, the plot is displayed. Defaults to ''.
+        x_lims (tuple | None, optional): Tuple (min_x, max_x) to manually set the x-axis limits for all subplots. 
+                                         If None, limits are auto-calculated based on data. Defaults to None.
+        ax1_label (str, optional): Label for the first column's data (e.g., 'Train Data'). Defaults to 'Train Data'.
+        ax2_label (str, optional): Label for the second column's data (e.g., 'Independent Data'). Defaults to 'Independent Data'.
+        ax_label_fontsize (int, optional): Base font size for axis labels and legend. Titles are larger. Defaults to 10.
+
+    Raises:
+        AssertionError: If `data_list1`, `data_list2`, and `subplot_title` do not have the same length. 
+                        (Note: While not explicitly coded, this is a necessary pre-condition).
+    
+    Returns:
+        None: Displays or saves the plot.
+    """
+    if subplot_title is None:
+        subplot_title = [f'Type - {i+1}' for i in range(len(data_list1))]
+    else:
+        assert len(data_list1) == len(data_list2) == len(subplot_title), "Titles must match number of datasets."
 
     fig, axes = plt.subplots(len(data_list1), 2, figsize=figsize)
     
@@ -2413,9 +2487,52 @@ def plot_distribution_compair(data_list1: List[np.ndarray | list],
         
         
 def plot_multiple_distribution(data_list1, n_cols=0, figsize=None, subplot_title=None,
-                    suptitle="Density", ax1_label="Property", subplot_type='Dataset',
-                    ax_label_fontsize=12, bins=30, alpha=0.6, kde=True,
-                    x_lims=None, savepath=None) -> None:
+                    suptitle="Density", x_label="Property", subplot_type='Dataset',
+                    ax_label_fontsize=12, alpha=0.6, x_lims=None, savepath=None, log_scale=False
+                    ) -> None:
+    
+    """
+    Generates a figure with multiple Kernel Density Estimate (KDE) plots 
+    for visualizing the distribution of several datasets.
+
+    Each dataset in `data_list1` is plotted in a separate subplot, along with 
+    vertical lines indicating key statistical measures (mean, median, mode, min, max).
+    The function aims to standardize the x-axis limits across all subplots 
+    for easier visual comparison.
+
+    This function requires `matplotlib.pyplot` (as `plt`), `numpy` (as `np`), 
+    `seaborn` (as `sns`), and a custom `data_stat` function (which must 
+    return: min, max, mean, median, mode, and one ignored value).
+
+    Args:
+        data_list1 (List[np.ndarray | list]): A list of data arrays/lists, where each element 
+                                              will be plotted as a separate distribution.
+        n_cols (int, optional): The number of columns for the subplot grid. 
+                                If 0, it's calculated as the square root of the number of datasets. Defaults to 0.
+        figsize (tuple | None, optional): Figure size (width, height). If None, it's auto-calculated 
+                                          based on the number of rows and columns. Defaults to None.
+        subplot_title (List[str] | None, optional): A list of titles for each subplot (e.g., feature names). 
+                                                    Must match the length of `data_list1`. Defaults to None (empty titles).
+        suptitle (str, optional): Main title for the entire figure. Defaults to 'Density'.
+        x_label (str, optional): Label for the x-axis of all subplots. Defaults to 'Property'.
+        subplot_type (str, optional): Prefix for the subplot title (e.g., 'Dataset: Title'). Defaults to 'Dataset'.
+        ax_label_fontsize (int, optional): Base font size for axis labels and legend. Titles are larger. Defaults to 12.
+        bins (int, optional): Number of bins for potential histogram (though only KDE is currently plotted). Defaults to 30.
+        alpha (float, optional): Transparency level for the KDE fill. Defaults to 0.6.
+        kde (bool, optional): Placeholder for enabling/disabling KDE (currently always plots KDE). Defaults to True.
+        x_lims (tuple | None, optional): Tuple (min_x, max_x) to manually set the x-axis limits for all subplots. 
+                                         If None, limits are auto-calculated from the *first* dataset in `data_list1`. 
+                                         NOTE: The limit calculation logic in the function is currently flawed as 
+                                         it only uses `data_list1[0]` to determine the global limits. Defaults to None.
+        savepath (str | None, optional): File path to save the figure. If None, the plot is displayed. Defaults to None.
+        log_scale (bool): Plot the KDE curve in log scale or not.
+
+    Raises:
+        AssertionError: If `subplot_title` is provided but its length does not match `data_list1`.
+    
+    Returns:
+        None: Displays or saves the plot.
+    """
 
     if not n_cols:
         n_cols = int(np.sqrt(len(data_list1)))
@@ -2430,7 +2547,7 @@ def plot_multiple_distribution(data_list1, n_cols=0, figsize=None, subplot_title
 
     # --- Titles handling ---
     if subplot_title is None:
-        subplot_title = [''] * n_datasets
+        subplot_title = [f'Type - {i+1}' for i in range(len(data_list1))]
     else:
         assert len(data_list1) == len(subplot_title), "Titles must match number of datasets."
 
@@ -2458,10 +2575,10 @@ def plot_multiple_distribution(data_list1, n_cols=0, figsize=None, subplot_title
 
         # Compute stats (replace with your function)
         min_value1, max_value1, mean_value1, median_value1, mode_value1, _ = data_stat(data)
-        sns.kdeplot(data, ax=ax, color='green', linewidth=1, fill=True, edgecolor="black", alpha=0.4)
+        sns.kdeplot(data, ax=ax, color='green', linewidth=1, fill=True, edgecolor="black", alpha=alpha, log_scale=log_scale)
 
         ax.set_title(f'{subplot_type}: {subplot_title[idx]}', fontsize=ax_label_fontsize + 3)
-        ax.set_xlabel(ax1_label, fontsize=ax_label_fontsize)
+        ax.set_xlabel(x_label, fontsize=ax_label_fontsize)
         ax.set_ylabel('Density', fontsize=ax_label_fontsize)
 
         # Vertical lines
@@ -2491,19 +2608,66 @@ def plot_multiple_distribution(data_list1, n_cols=0, figsize=None, subplot_title
     
 def plot_hist_compair(data_list1: List[np.ndarray | list],
                       data_list2: List[np.ndarray | list],
-                      subplot_title: List[str],
+                      subplot_title: List[str] = None,
                       bins: int = 30,
                       alpha: float = 0.4,
                       figsize: tuple = (12, 12),
                       suptitle: str = 'Suptitle',
                       savepath: str = '',
-                      ax1_label: str = 'Train Data',
-                      ax2_label: str = 'Independent Data',
+                      ax1_label: str = 'Data - 1',
+                      ax2_label: str = 'Data - 2',
                       x_lims: tuple | None = None,
+                      x_label: str = 'X - axis',
                       ax_label_fontsize: int = 10,
-                      kde=False
+                      kde=True,
+                      stat='density'
                       ):
+    """
+    Generates a figure with side-by-side Histograms for comparing the frequency 
+    distributions of paired data sets.
 
+    The function plots the histogram from `data_list1` (e.g., 'Train Data') 
+    against the corresponding histogram from `data_list2` (e.g., 'Independent Data') 
+    for each pair of data arrays/lists. Each subplot includes vertical lines 
+    for mean, median, mode, min, and max values. Optionally, a Kernel Density Estimate (KDE) 
+    can be overlaid on the histograms.
+
+    This function requires `matplotlib.pyplot` (as `plt`), `numpy` (as `np`), 
+    `seaborn` (as `sns` if `kde=True`), and a custom `data_stat` function 
+    (which must return: min, max, mean, median, mode, and one ignored value).
+
+    Args:
+        data_list1 (List[np.ndarray | list]): A list of data arrays/lists for the first set (e.g., training data).
+        data_list2 (List[np.ndarray | list]): A list of data arrays/lists for the second set (e.g., independent data), 
+                                              must have the same length as `data_list1`.
+        subplot_title (List[str]): A list of titles for each pair of subplots (e.g., feature names), 
+                                   must have the same length as `data_list1`.
+        bins (int, optional): The number of bins to use for the histogram. Defaults to 30.
+        alpha (float, optional): Transparency level for the histogram bars. Defaults to 0.4.
+        figsize (tuple, optional): Figure size (width, height). Defaults to (12, 12).
+        suptitle (str, optional): Main title for the entire figure. Defaults to 'Suptitle'.
+        savepath (str, optional): File path to save the figure. If empty, the plot is displayed. Defaults to ''.
+        ax1_label (str, optional): Label for the first column's data (e.g., 'Train Data'). Defaults to 'Train Data'.
+        ax2_label (str, optional): Label for the second column's data (e.g., 'Independent Data'). Defaults to 'Independent Data'.
+        x_lims (tuple | None, optional): Tuple (min_x, max_x) to manually set the x-axis limits for all subplots. 
+                                         If None, limits are auto-calculated based on both paired data sets. Defaults to None.
+        ax_label_fontsize (int, optional): Base font size for axis labels and legend. Titles are larger. Defaults to 10.
+        kde (bool, optional): If True, overlays a Kernel Density Estimate (KDE) plot on the histogram. Defaults to False.
+
+    Raises:
+        AssertionError: If `data_list1`, `data_list2`, and `subplot_title` do not have the same length. 
+                        (Note: This is a necessary pre-condition for the loops to work correctly).
+    
+    Returns:
+        None: Displays or saves the plot.
+    """
+
+    kde = False if stat == 'probability' else kde
+    if subplot_title is None:
+        subplot_title = [f'Type - {i+1}' for i in range(len(data_list1))]
+    else:
+        assert len(data_list1) == len(data_list2) == len(subplot_title), "Titles must match number of datasets."
+        
     fig, axes = plt.subplots(len(data_list1), 2, figsize=figsize)
     
     # # Convert axes to 2D array format if len(data_list1) is 1
@@ -2511,7 +2675,7 @@ def plot_hist_compair(data_list1: List[np.ndarray | list],
         axes = np.array([axes])
 
     plt.suptitle(suptitle, fontsize=ax_label_fontsize+10, fontweight='bold')
-    for i, data in enumerate(data_list1):
+    for i, _ in enumerate(data_list1):
         
         min_value1, max_value1, mean_value1, median_value1, mode_value1, _ = data_stat(data_list1[i])
         min_value2, max_value2, mean_value2, median_value2, mode_value2, _ = data_stat(data_list2[i])
@@ -2532,10 +2696,15 @@ def plot_hist_compair(data_list1: List[np.ndarray | list],
             max_x = max_x+mean_max_x if mean_max_x>0 else max_x-mean_max_x
         
         # Bar plot (on the left column)
-        axes[i, 0].hist(data_list1[i], bins=bins, alpha=alpha, color='orange', edgecolor='black')
+        # axes[i, 0].hist(data_list1[i], bins=bins, alpha=alpha, color='orange', edgecolor='black')
+        sns.histplot(data_list1[i], ax=axes[i, 0], color='green', bins=bins, stat=stat,
+                     edgecolor='black', linewidth=1, alpha=alpha)
+        if kde:
+            sns.kdeplot(data_list1[i], ax=axes[i, 0], color='red', linewidth=1)
+            
         axes[i, 0].set_title(f'{ax1_label}: {subplot_title[i]}\n', fontsize=ax_label_fontsize+5)
-        axes[i, 0].set_xlabel(f'{subplot_title[i]}\n', fontsize=ax_label_fontsize)
-        axes[i, 0].set_ylabel('Frequency', fontsize=ax_label_fontsize)
+        axes[i, 0].set_xlabel(f'{x_label}\n', fontsize=ax_label_fontsize)
+        axes[i, 0].set_ylabel(stat.capitalize(), fontsize=ax_label_fontsize)
         axes[i, 0].set_xlim(min_x, max_x)  # Set x-limits to the calculated min and max
         
         axes[i, 0].axvline(mean_value1, color='r', linestyle='-.', label=f'Mean: {mean_value1:.2f}')
@@ -2545,14 +2714,18 @@ def plot_hist_compair(data_list1: List[np.ndarray | list],
         axes[i, 0].axvline(max_value1, color='violet', linestyle='-.', label=f'Max: {max_value1:.2f}')
         axes[i, 0].legend(loc='upper right', fontsize=ax_label_fontsize)  # Add legend to bar plot
         axes[i, 0].grid()
-        if kde:
-            sns.kdeplot(data_list1[i], ax=axes[i, 0], color='red', linewidth=1, alpha=alpha)
+        # if kde:
+        #     sns.kdeplot(data_list1[i], ax=axes[i, 0], color='red', linewidth=1, alpha=alpha)
 
         # Bar plot (on the left column)
-        axes[i, 1].hist(data_list2[i], bins=bins, alpha=alpha, color='orange', edgecolor='black')
+        # axes[i, 1].hist(data_list2[i], bins=bins, alpha=alpha, color='orange', edgecolor='black')
+        sns.histplot(data_list2[i], ax=axes[i, 1], color='green', bins=bins, stat=stat,
+                     edgecolor='black', linewidth=1, alpha=alpha)
+        if kde:
+            sns.kdeplot(data_list2[i], ax=axes[i, 1], color='red', linewidth=1)
         axes[i, 1].set_title(f'{ax2_label}: {subplot_title[i]}\n', fontsize=ax_label_fontsize+5)
-        axes[i, 1].set_xlabel(f'{subplot_title[i]}\n', fontsize=ax_label_fontsize)
-        axes[i, 1].set_ylabel('Frequency', fontsize=ax_label_fontsize)
+        axes[i, 1].set_xlabel(f'{x_label}\n', fontsize=ax_label_fontsize)
+        axes[i, 1].set_ylabel(stat.capitalize(), fontsize=ax_label_fontsize)
         axes[i, 1].set_xlim(min_x, max_x)  # Set x-limits to the calculated min and max
         
         axes[i, 1].axvline(mean_value2, color='r', linestyle='-.', label=f'Mean: {mean_value2:.2f}')
@@ -2654,10 +2827,58 @@ def plot_hist_compair(data_list1: List[np.ndarray | list],
 
 
 def plot_multiple_hist(data_list1, n_cols=0, figsize=None, subplot_title=None,
-                    suptitle="Histograms", ax1_label="Property", subplot_type='Dataset',
+                    suptitle="Histograms", x_label="Property", subplot_type='Dataset',
                     ax_label_fontsize=12, bins=30, alpha=0.6, kde=True,
-                    x_lims=None, savepath=None):
+                    x_lims=None, savepath=None, stat="density"):
     
+    """
+    Generates a figure with multiple Histograms for visualizing the frequency 
+    or density distribution of several datasets.
+
+    Each dataset in `data_list1` is plotted as a histogram in a separate subplot, 
+    with `stat="density"` used for the histogram to make it comparable with the 
+    optional KDE overlay. Vertical lines indicate key statistical measures (mean, 
+    median, mode, min, max). The function attempts to standardize the x-axis 
+    limits across all subplots for comparison.
+
+    This function requires `matplotlib.pyplot` (as `plt`), `numpy` (as `np`), 
+    `seaborn` (as `sns`), and a custom `data_stat` function (which must 
+    return: min, max, mean, median, mode, and one ignored value).
+
+    Args:
+        data_list1 (List[np.ndarray | list]): A list of data arrays/lists, where each element 
+                                              will be plotted as a separate distribution.
+        n_cols (int, optional): The number of columns for the subplot grid. 
+                                If 0, it's calculated as the square root of the number of datasets. Defaults to 0.
+        figsize (tuple | None, optional): Figure size (width, height). If None, it's auto-calculated 
+                                          based on the number of rows and columns. Defaults to None.
+        subplot_title (List[str] | None, optional): A list of titles for each subplot (e.g., feature names). 
+                                                    Must match the length of `data_list1`. Defaults to None (empty titles).
+        suptitle (str, optional): Main title for the entire figure. Defaults to 'Histograms'.
+        x_label (str, optional): Label for the x-axis of all subplots. Defaults to 'Property'.
+        subplot_type (str, optional): Prefix for the subplot title (e.g., 'Dataset: Title'). Defaults to 'Dataset'.
+        ax_label_fontsize (int, optional): Base font size for axis labels and legend. Titles are larger. Defaults to 12.
+        bins (int, optional): The number of bins to use for the histogram. Defaults to 30.
+        alpha (float, optional): Transparency level for the histogram bars. Defaults to 0.6.
+        kde (bool, optional): If True, overlays a Kernel Density Estimate (KDE) plot on the histogram. Defaults to True.
+        x_lims (tuple | None, optional): Tuple (min_x, max_x) to manually set the x-axis limits for all subplots. 
+                                         If None, limits are auto-calculated from the *first* dataset in `data_list1`. 
+                                         NOTE: The limit calculation logic in the function is currently flawed as 
+                                         it only uses `data_list1[0]` to determine the global limits. Defaults to None.
+        savepath (str | None, optional): File path to save the figure. If None, the plot is displayed. Defaults to None.
+        stat (str): Control the normalization of the bars
+                    - stat='count': Y-axis is the number of observations (Frequency). Area not equal 1.
+                    - stat='density': Y-axis is the density. Area = 1.
+                    - stat='probability': Y-axis is the probability. Sum of bar heights = 1.
+
+    Raises:
+        AssertionError: If `subplot_title` is provided but its length does not match `data_list1`.
+    
+    Returns:
+        None: Displays or saves the plot.
+    """
+    
+    kde = False if stat == 'probability' else kde
     if not n_cols:
         n_cols = int(np.sqrt(len(data_list1)))
     # --- Figure size ---
@@ -2671,7 +2892,7 @@ def plot_multiple_hist(data_list1, n_cols=0, figsize=None, subplot_title=None,
 
     # --- Titles handling ---
     if subplot_title is None:
-        subplot_title = [''] * n_datasets
+        subplot_title = [f'Type - {i+1}' for i in range(len(data_list1))]
     else:
         assert len(data_list1) == len(subplot_title), "Titles must match number of datasets."
 
@@ -2700,14 +2921,14 @@ def plot_multiple_hist(data_list1, n_cols=0, figsize=None, subplot_title=None,
         # Compute stats (replace with your function)
         min_value1, max_value1, mean_value1, median_value1, mode_value1, _ = data_stat(data)
 
-        sns.histplot(data, ax=ax, color='green', bins=bins, stat="density",
+        sns.histplot(data, ax=ax, color='green', bins=bins, stat=stat,
                      edgecolor='black', linewidth=1, alpha=alpha)
         if kde:
             sns.kdeplot(data, ax=ax, color='red', linewidth=1)
 
         ax.set_title(f'{subplot_type}: {subplot_title[idx]}', fontsize=ax_label_fontsize + 3)
-        ax.set_xlabel(ax1_label, fontsize=ax_label_fontsize)
-        ax.set_ylabel('Density', fontsize=ax_label_fontsize)
+        ax.set_xlabel(x_label, fontsize=ax_label_fontsize)
+        ax.set_ylabel(stat.capitalize(), fontsize=ax_label_fontsize)
 
         # Vertical lines
         ax.axvline(mean_value1, color='r', linestyle='-.', label=f'Mean: {mean_value1:.2f}')
@@ -2735,17 +2956,63 @@ def plot_multiple_hist(data_list1, n_cols=0, figsize=None, subplot_title=None,
     
 def dist_hist_comparison(data_list1: List[np.ndarray | list],
                          data_list2: List[np.ndarray | list],
-                         subplot_title: List[str],
+                         subplot_title: List[str] = None,
                          figsize: tuple = (12, 12),
-                         list1_label: str = 'Original',
-                         list2_label: str = 'Predicted',
-                         x_label: str = 'logPapp Value',
+                         list1_label: str = 'Data - 1',
+                         list2_label: str = 'Data - 2',
+                         x_label: str = 'X - axis',
                          suptitle: str = 'Suptitle',
                          bins: int = 30,
                          alpha: float = 0.4,
                          x_lims: tuple = None,
-                         savepath: str = ''
+                         stat: str = 'density',
+                         savepath: str = '',
                          ):
+    
+    """
+    Generates a figure with side-by-side Histogram and Kernel Density Estimate (KDE) 
+    plots for comparing the distribution of paired data sets.
+
+    For each corresponding pair of data arrays/lists from `data_list1` and `data_list2`, 
+    it creates two subplots:
+    1. A **Histogram** with overlaid bars to compare the frequency counts.
+    2. A **KDE Plot** with overlaid distributions to compare the density shapes.
+
+    The x-axis limits are standardized across both the histogram and the KDE plot 
+    for each pair to facilitate direct visual comparison.
+
+    This function requires `matplotlib.pyplot` (as `plt`), `numpy` (as `np`), 
+    and `seaborn` (as `sns`).
+
+    Args:
+        data_list1 (List[np.ndarray | list]): A list of data arrays/lists for the first set (e.g., 'Original' data).
+        data_list2 (List[np.ndarray | list]): A list of data arrays/lists for the second set (e.g., 'Predicted' data), 
+                                              must have the same length as `data_list1`.
+        subplot_title (List[str]): A list of base titles for each pair of subplots (e.g., condition or feature names), 
+                                   must have the same length as `data_list1`.
+        figsize (tuple, optional): Figure size (width, height). Defaults to (12, 12).
+        list1_label (str, optional): Legend label for the data in `data_list1`. Defaults to 'Original'.
+        list2_label (str, optional): Legend label for the data in `data_list2`. Defaults to 'Predicted'.
+        x_label (str, optional): The label for the x-axis in all subplots. Defaults to 'logPapp Value'.
+        suptitle (str, optional): Main title for the entire figure. Defaults to 'Suptitle'.
+        bins (int, optional): The number of bins to use for the histograms. Defaults to 30.
+        alpha (float, optional): Transparency level for the histogram bars and KDE fill. Defaults to 0.4.
+        x_lims (tuple | None, optional): Tuple (min_x, max_x) to manually set the x-axis limits for all subplots. 
+                                         If None, limits are auto-calculated based on the data. Defaults to None.
+        savepath (str, optional): File path to save the figure. If empty, the plot is displayed. Defaults to ''.
+
+    Raises:
+        AssertionError: If `data_list1`, `data_list2`, and `subplot_title` do not have the same length. 
+                        (Note: This is a necessary pre-condition for the loops to work correctly).
+
+    Returns:
+        None: Displays or saves the plot.
+    """
+    kde = False if stat == 'probability' else kde
+    if subplot_title is None:
+        subplot_title = [f'Type - {i+1}' for i in range(len(data_list1))]
+    else:
+        assert len(data_list1) == len(data_list2) == len(subplot_title), "Titles must match number of datasets."
     
     # Create a 3x2 grid of subplots
     fig, axes = plt.subplots(len(data_list1), 2, figsize=figsize)
@@ -2772,11 +3039,13 @@ def dist_hist_comparison(data_list1: List[np.ndarray | list],
             max_x = max_x+mean_max_x if mean_max_x>0 else max_x-mean_max_x
         
         # Bar plot (on the left column)
-        axes[i, 0].hist(data_list1[i], bins=bins, alpha=alpha, color='green', edgecolor='black', label=list1_label)
-        axes[i, 0].hist(data_list2[i], bins=bins, alpha=alpha, color='red', edgecolor='black', label = list2_label)
+        sns.histplot(data_list1[i], ax=axes[i, 0], color='green', bins=bins, stat=stat,
+                     edgecolor='black', linewidth=1, alpha=alpha, label=list1_label)
+        sns.histplot(data_list2[i], ax=axes[i, 0], color='red', bins=bins, stat=stat,
+                     edgecolor='black', linewidth=1, alpha=alpha, label = list2_label)
         axes[i, 0].set_title(f'{subplot_title[i]} - Bar Plot')
         axes[i, 0].set_xlabel(x_label)
-        axes[i, 0].set_ylabel('Frequency')
+        axes[i, 0].set_ylabel(stat.capitalize())
         axes[i, 0].legend(loc='upper right')
         
         axes[i, 0].set_xlim(min_x, max_x)  # Set x-range from -9 to -3
@@ -2803,6 +3072,72 @@ def dist_hist_comparison(data_list1: List[np.ndarray | list],
     else:
         plt.show()
 
+def plot_stacked_bars(df, target_col, feature_cols='all', class_order=None,
+                      figsize=(10, 6), colormap='tab10', rotation=45):
+    """
+    Plot stacked bar charts for categorical feature(s) showing the distribution of target classes.
+
+    Parameters:
+    -----------
+    df : pandas.DataFrame
+        The DataFrame containing the data.
+    
+    target_col : str
+        Name of the target column (must be categorical or discrete).
+    
+    feature_cols : list or str, default='all'
+        List of feature columns to plot. If 'all', uses all object-type columns except the target.
+    
+    class_order : list, optional
+        List specifying the desired order of target classes in the stacked bars and legend.
+        If None, uses sorted unique values from the data.
+    
+    figsize : tuple, default=(10, 6)
+        Figure size for each plot.
+    
+    colormap : str or matplotlib colormap, default='tab10'
+        Colormap to use for the bars (one color per target class).
+    
+    rotation : int, default=45
+        Rotation angle for x-axis tick labels.
+    
+    Returns:
+    --------
+    None
+        Displays the stacked bar plots.
+    """
+    
+    if feature_cols == 'all':
+        # Automatically select object (categorical) columns excluding the target
+        categorical_columns = [col for col in df.columns if col != target_col]
+    else:
+        categorical_columns = [col for col in feature_cols if col != target_col]
+    
+    # Determine the order of classes
+    if class_order is None:
+        class_order = sorted(df[target_col].dropna().unique())
+
+    for col in categorical_columns:
+        # Crosstab of feature column vs. target column, with explicit class order
+        ct = pd.crosstab(df[col], df[target_col])
+
+        # Reorder the columns (i.e., target classes) as per class_order
+        for cls_ in class_order:
+            if cls_ not in ct.columns:
+                ct[cls_] = 0  # add missing class as 0s
+
+        ct = ct[class_order]  # re-order columns
+
+        # Plot
+        ct.plot(kind='bar', stacked=True, figsize=figsize, colormap=colormap)
+
+        plt.title(f"Distribution of target by category in '{col}'")
+        plt.xlabel(col)
+        plt.ylabel("Count")
+        plt.legend(title=target_col)
+        plt.xticks(rotation=rotation)
+        plt.tight_layout()
+        plt.show()
 
 
 def percentage_within_fold_change(y_true, y_pred, fold=2):
@@ -2857,7 +3192,7 @@ def geometric_mean_fold_error(y_true, y_pred):
         idx = np.where(y_pred <= 0)[0]
         print(f"Total: {len(idx)} with Index: {idx} contains non-positive numbers. y_pred must not contain non-positive numbers.")
 
-    valid = (y_true > 0) & (y_pred > 0)
+    valid = ((y_true > 0) & (y_pred > 0)) or ((y_true < 0) & (y_pred < 0))
     invalid = len(y_true) - len(y_pred[valid])
     
     # log_fold_errors = np.abs(np.log10(y_pred[valid] / y_true[valid]))
@@ -2891,22 +3226,56 @@ def min_max(y_true, y_pred, range_list, eps = 0.5):
     
     return percent
 
+def gmfe(y_true, y_pred, eps=1e-8, base=10):
+    """
+    Generalized Geometric Mean Fold Error (GMFE).
+    
+    Parameters
+    ----------
+    y_true : array-like
+        Ground truth values.
+    y_pred : array-like
+        Predicted values.
+    eps : float, optional
+        Small constant added to avoid division by zero (default: 1e-8).
+    base : float, optional
+        Logarithm base (default: 10, use np.e for natural log).
+    
+    Returns
+    -------
+    float
+        Geometric Mean Fold Error.
+    """
+    y_true = np.array(y_true, dtype=float)
+    y_pred = np.array(y_pred, dtype=float)
+
+    # Ratios with absolute values to avoid undefined logs
+    ratio = (np.abs(y_pred) + eps) / (np.abs(y_true) + eps)
+
+    # Compute log in chosen base
+    logs = np.log(ratio) / np.log(base)
+
+    # GMFE formula
+    gmfe_value = base ** (np.mean(np.abs(logs)))
+    return gmfe_value
+
 def regression_test_metrics(y_true: np.ndarray[float] | List[float],
-                 y_pred: np.ndarray[float] | List[float]
+                 y_pred: np.ndarray[float] | List[float],
+                 transform_func=lambda x: x
             ) -> OrderedDict[str, float]:
     
     '''
     Input:
         - model: Random Forest Model
-        - X_test: DataFrame Object
-        - y_test: Datafrane Object
+        - y_true: Array/List Object
+        - y_pred: Array/List Object
     
     Output: A dictionary containing MSE, RMSE, MAE and r2 Values.
     '''
     if not isinstance(y_pred, np.ndarray):
-        y_pred = np.array(y_pred)
+        y_pred = transform_func(np.array(y_pred))
     if not isinstance(y_true, np.ndarray):
-        y_true = np.array(y_true)
+        y_true = transform_func(np.array(y_true))
 
     assert y_pred.shape == y_true.shape, f"Shape mismatch: y_pred -> {y_pred.shape}, y_true -> {y_true.shape}"
     
@@ -2915,9 +3284,11 @@ def regression_test_metrics(y_true: np.ndarray[float] | List[float],
     mse_test = rmse_test**2
     mae_test = mean_absolute_error(y_true, y_pred)
     r2_val_test = r2_score(y_true, y_pred)
-    fold2, _, _ = percentage_within_fold_change(y_true=y_true, y_pred=y_pred, fold=2)
-    fold3, _, _ = percentage_within_fold_change(y_true=y_true, y_pred=y_pred, fold=3)
-    fold5, _, _ = percentage_within_fold_change(y_true=y_true, y_pred=y_pred, fold=5)
+    pcc = np.corrcoef(y_true, y_pred,)[0, 1]
+    fold2, _, _ = percentage_within_fold_change(y_true=10**y_true, y_pred=10**y_pred, fold=2)
+    fold3, _, _ = percentage_within_fold_change(y_true=10**y_true, y_pred=10**y_pred, fold=3)
+    fold5, _, _ = percentage_within_fold_change(y_true=10**y_true, y_pred=10**y_pred, fold=5)
+    _gmfe = gmfe(y_true=10**y_true, y_pred=10**y_pred,)
     
     
     results = OrderedDict({'mse':round(mse_test, 2),
@@ -2926,14 +3297,17 @@ def regression_test_metrics(y_true: np.ndarray[float] | List[float],
                            'r2':round(r2_val_test, 2),
                            'fold2':round(fold2, 2),
                            'fold3':round(fold3, 2),
-                           'fold5':round(fold5, 2)
+                           'fold5':round(fold5, 2),
+                           'PCC':round(pcc, 2),
+                           'GMFE':round(_gmfe, 2)
                            })
     
     return results
 
 def subset_loader(dataloader: DataLoader,
                   batch_size: int,
-                  subset_ratio: float = 0.2
+                  subset_ratio: float = 0.2,
+                  collate_fn=None
                   ) -> Tuple[DataLoader, DataLoader]:
     
     '''
@@ -2951,13 +3325,13 @@ def subset_loader(dataloader: DataLoader,
     perm = np.random.permutation(np.arange(len(original_dataset)))
     subset_indices = list(perm[:subset_size])
     subset_dataset = Subset(original_dataset, subset_indices)
-    subset_loader = torch.utils.data.DataLoader(subset_dataset, batch_size=batch_size, shuffle=True)
-    
+    subset_loader = torch.utils.data.DataLoader(subset_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+
     if float(subset_ratio) != 1.0:
         complement_indices = list(perm[subset_size:])
         complement_subset_dataset = Subset(original_dataset, complement_indices)
-        complement_loader = torch.utils.data.DataLoader(complement_subset_dataset, batch_size=batch_size, shuffle=True)
-    
+        complement_loader = torch.utils.data.DataLoader(complement_subset_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+
     return subset_loader, complement_loader
 
 
@@ -3494,3 +3868,57 @@ class RandomForestSHAPAnalyzer:
                 intersection.append(col)
 
         return intersection
+    
+    def fix_matplotlib_params(self):
+
+        # =============================
+        # Global Matplotlib Style Setup
+        # =============================
+
+        plt.rcParams.update({
+
+            # ---- Figure ----
+            'figure.figsize': (8, 6),           # default figure size
+            'figure.dpi': 100,                  # resolution
+            'figure.facecolor': 'white',        # background color
+
+            # ---- Axes ----
+            'axes.labelsize': 14,               # font size of x/y labels
+            'axes.labelweight': 'bold',         # weight of axis labels
+            'axes.titlesize': 16,               # title font size
+            'axes.titleweight': 'bold',         # title weight
+            'axes.edgecolor': 'black',          # border color
+            'axes.linewidth': 1.2,              # border line width
+
+            # ---- Ticks ----
+            'xtick.labelsize': 12,              # x tick label size
+            'ytick.labelsize': 12,              # y tick label size
+            'xtick.direction': 'in',            # in, out, inout
+            'ytick.direction': 'in',
+            'xtick.major.size': 6,              # major tick length
+            'ytick.major.size': 6,
+            'xtick.minor.size': 3,              # minor tick length
+            'ytick.minor.size': 3,
+
+            # ---- Lines & Markers ----
+            'lines.linewidth': 2,               # default line width
+            'lines.markersize': 6,              # default marker size
+            'lines.marker': None,               # default marker style
+
+            # ---- Legend ----
+            'legend.fontsize': 12,
+            'legend.loc': 'best',
+            'legend.frameon': True,
+            'legend.edgecolor': 'black',
+
+            # ---- Font ----
+            'font.family': 'serif',             # font family (e.g., serif, sans-serif)
+            'font.style': 'italic',
+            'font.size': 12,                    # base font size
+            'font.weight': 'normal',
+
+            # ---- Grid ----
+            'grid.color': 'gray',
+            'grid.linestyle': '--',
+            'grid.linewidth': 0.5,
+        })

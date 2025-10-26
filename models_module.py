@@ -41,6 +41,7 @@ __all__ = [
     'TFT',
     'LSTMnetwork',
     'SMILESLinearNet',
+    'GCNLayer',
     'GCN',
     'GCN_Connected',
     'MRGCN',
@@ -112,7 +113,8 @@ def make_mlp(list_dims, dropout=0.0, act_func='relu', norm_type='layer', alpha=1
                                For example, [128, 256, 64, 1] creates 3 layers.
         dropout (float): Dropout rate to apply after each activation (except the final layer). Default is 0.0.
         act_func (Union[str, List[str], None]): Activation function(s) to use. 
-            - If a single string (e.g., 'relu', 'elu', 'leakyrelu'), it is used for all hidden layers.
+            - If a single string (e.g., 'relu', 'elu', 'leakyrelu'), it is used for all hidden layers. 
+              If list_dims=[128,256,64,1], then act_func list must have length 2 (for the two hidden layers [256,64]).
             - If a list of strings, it must have `len(list_dims) - 2` entries (for hidden layers only).
             - If None, no activation is applied.
         norm_type (str): Type of normalization to apply after each linear layer:
@@ -130,10 +132,12 @@ def make_mlp(list_dims, dropout=0.0, act_func='relu', norm_type='layer', alpha=1
 
     # Standardize act_func to a list of activation layers
     num_layers = len(list_dims) - 1
-    if isinstance(act_func, (str, None)):
+    if act_func is None:
+        act_funcs = [nn.Identity()] * (num_layers - 1)
+    elif isinstance(act_func, str):
         act_funcs = [activation_func(act_func, alpha=alpha, negative_slope=negative_slope)] * (num_layers - 1)
     elif isinstance(act_func, list):
-        assert (len(act_func) != num_layers - 1), f"Length of act_func list {len(act_func)} must match the number of hidden layers {(len(list_dims) - 2)}."
+        assert (len(act_func) == num_layers - 1), f"Length of act_func list {len(act_func)} must match the number of hidden layers {(len(list_dims) - 2)}."
         act_funcs = [activation_func(name, alpha=alpha, negative_slope=negative_slope) for name in act_func]
     else:
         raise TypeError("act_func must be a string or a list of strings.")
@@ -1677,7 +1681,6 @@ class RGCNConv(nn.Module):
             out += torch.matmul(adj, h_rel)
             
         # ********************************************************************************
-        ## Changed (To reverse uncomment the next line and comment the line after. Also change in get_multirelational_bond_matrix function in utils_.py file)
         out += torch.matmul(x, self.self_loop_weight)
         # out = out/num_relations
         # ********************************************************************************
@@ -1687,18 +1690,112 @@ class RGCNConv(nn.Module):
 
         return out
 
+# class MRGCN(nn.Module):
+#     """
+#     Multi-Relational Graph Convolutional Network with optional attention pooling.
+#     """
+#     def __init__(self,
+#                  list_dims_gcn,
+#                  list_dims_fc,
+#                  dropout,
+#                  max_num_atom,
+#                  num_relations=4,
+#                  act_func='relu',
+#                  act_func_gcn='relu',
+#                  norm_type='layer',
+#                  alpha=1.0,
+#                  negative_slope=1e-2,
+#                  use_attention=False):   # <--- new flag
+#         super().__init__()
+#         self.max_num_atom = max_num_atom
+#         self.list_dims_gcn = list_dims_gcn
+#         self.list_dims_fc = list_dims_fc
+#         self.num_relations = num_relations
+#         self.act_func = act_func
+#         self.act_func_gcn = act_func_gcn
+#         self.norm_type = norm_type
+#         self.use_attention = use_attention
+
+#         # --- GCN Layers ---
+#         self.gcn_layers = nn.ModuleList([
+#             RGCNConv(list_dims_gcn[i], list_dims_gcn[i + 1], num_relations=self.num_relations)
+#             for i in range(len(list_dims_gcn) - 1)
+#         ])
+#         self.gcn_layer_norms = nn.ModuleList([
+#             nn.LayerNorm(list_dims_gcn[i + 1]) for i in range(len(list_dims_gcn) - 2)
+#         ])
+
+#         self.dropout = nn.Dropout(dropout)
+#         self.activation_func_gcn = activation_func(self.act_func_gcn, alpha=alpha, negative_slope=negative_slope)
+
+#         # --- Attention Pooling (only used if flag=True) ---
+#         self.att_pool = nn.Linear(list_dims_gcn[-1], 1)
+
+#         # --- Fully connected head ---
+#         if len(self.list_dims_fc) > 0:
+#             self.fc_conn = nn.Linear(list_dims_gcn[-1], list_dims_fc[0])
+#             self.input2repr = make_mlp(list_dims=list_dims_fc, dropout=dropout, act_func=act_func, norm_type=norm_type)
+#         else:
+#             self.fc_conn = nn.Identity()
+#             self.input2repr = nn.Identity()
+
+#     def __repr__(self):
+#         return auto_repr(self)
+
+#     def get_features(self, x, adjacency_tensor, degree_tensor):
+#         """
+#         Extract graph-level features with mean or attention pooling.
+#         """
+#         adjacency_tensor = normalize_adjacency(adjacency=adjacency_tensor,
+#                                                degree=degree_tensor)
+
+#         for i in range(len(self.gcn_layers)):
+#             if i < len(self.gcn_layers) - 1:
+#                 x = self.activation_func_gcn(self.gcn_layers[i](x, adjacency_tensor))
+#                 x = self.gcn_layer_norms[i](x)
+#                 x = self.dropout(x)
+#             else:
+#                 x = self.gcn_layers[i](x, adjacency_tensor)
+
+#         # --- Conditional pooling ---
+#         if self.use_attention:
+#             att_weights = torch.softmax(self.att_pool(x), dim=1)  # [batch, num_nodes, 1]
+#             x = torch.sum(att_weights * x, dim=1)                 # weighted sum
+#         else:
+#             x = x.mean(dim=1)                                     # simple mean pooling
+
+#         self.feature_dim = x.shape[-1]
+#         return x
+
+#     def forward(self, feature_vector, adjacency_tensor, degree_tensor):
+#         """
+#         Forward pass from graph input to final prediction.
+#         """
+#         x = self.get_features(feature_vector, adjacency_tensor, degree_tensor)
+#         x = self.fc_conn(x)
+#         x = self.input2repr(x)
+#         return x
+
 
 class MRGCN(nn.Module):
     """
-    Task:
-        Multi-Relational Graph Convolutional Network with relation-aware aggregation and dense prediction head.
+    Multi-Relational Graph Convolutional Network with optional attention-based pooling and dense prediction head.
 
-    Inputs:
-        - list_dims_gcn: Dimensions of GCN layers
-        - list_dims_fc: Dimensions of FC layers
-        - dropout: Dropout probability
-        - max_num_atom: For weighted pooling (not used directly here)
-        - num_relations: Number of edge types
+    Args:
+        list_dims_gcn (list[int]): Dimensions for GCN layers.
+        list_dims_fc (list[int]): Dimensions for fully connected layers.
+        dropout (float): Dropout rate.
+        max_num_atom (int): Max number of atoms (used for pooling logic externally).
+        num_relations (int): Number of edge types in the graph.
+        act_func (str): Activation function for FC layers.
+        act_func_gcn (str): Activation function for GCN layers.
+        norm_type (str): Type of normalization ('layer', 'batch', etc.).
+        alpha (float): Parameter for certain activation functions (e.g., ELU).
+        negative_slope (float): Slope for LeakyReLU.
+        use_attention (bool): Whether to use attention-based pooling.
+        attn_type (str): Type of attention pooling ('self attention' or 'attention pool').
+        attn_dim (int): Attention dimension.
+        num_heads (int): Number of attention heads (for multi-head attention).
 
     Outputs:
         - Tensor: Final prediction or representation [batch_size, output_dim]
@@ -1713,8 +1810,11 @@ class MRGCN(nn.Module):
                  act_func_gcn='relu',
                  norm_type='layer',
                  alpha=1.0,
-                 negative_slope=1e-2
-                 ):#):
+                 negative_slope=1e-2,
+                 use_attention=False,       # <--- flag for QK^T V
+                 attn_type='attention pool',#'self attention',#            
+                 attn_dim=None,            # <--- dimension of attention projection
+                 num_heads=1):             # <--- optional multi-head attention
         super().__init__()
         self.max_num_atom = max_num_atom
         self.list_dims_gcn = list_dims_gcn
@@ -1725,6 +1825,12 @@ class MRGCN(nn.Module):
         self.act_func = act_func
         self.act_func_gcn = act_func_gcn
         self.norm_type = norm_type
+        self.attn_dim = attn_dim
+        self.num_heads = num_heads
+        self.alpha = alpha
+        self.negative_slope = negative_slope
+        self.use_attention = use_attention
+        self.attn_type = attn_type
 
         # GCN Layers
         self.gcn_layers = nn.ModuleList([
@@ -1734,6 +1840,17 @@ class MRGCN(nn.Module):
         self.gcn_layer_norms = nn.ModuleList([
             nn.LayerNorm(list_dims_gcn[i + 1]) for i in range(len(list_dims_gcn) - 2)
         ])
+        
+        # --- QK^T V Attention Pooling ---
+        hidden_dim = list_dims_gcn[-1]
+        attn_dim = attn_dim or hidden_dim
+        if self.use_attention and self.attn_type=='self attention':
+            self.W_Q = nn.Linear(hidden_dim, attn_dim * num_heads)
+            self.W_K = nn.Linear(hidden_dim, attn_dim * num_heads)
+            self.W_V = nn.Linear(hidden_dim, attn_dim * num_heads)
+            self.W_out = nn.Linear(attn_dim * num_heads, hidden_dim)
+        if self.use_attention and self.attn_type=='attention pool':
+            self.att_pool = nn.Linear(hidden_dim, 1)
 
         # Fully connected layers
         self.dropout = nn.Dropout(dropout)
@@ -1764,16 +1881,37 @@ class MRGCN(nn.Module):
         adjacency_tensor = normalize_adjacency(adjacency=adjacency_tensor,
                                                degree=degree_tensor
                                                )
-        for i in range(len(self.gcn_layers)):
+        for i, gcn_layer in enumerate(self.gcn_layers):
+            x = gcn_layer(x, adjacency_tensor)
             if i < len(self.gcn_layers) - 1:
-                x = self.activation_func_gcn(self.gcn_layers[i](x, adjacency_tensor))
+                x = self.activation_func_gcn(x)
                 x = self.gcn_layer_norms[i](x)
                 x = self.dropout(x)
-            else:
-                x = self.gcn_layers[i](x, adjacency_tensor)
 
-        # Average over nodes for each graph in the batch
-        x = x.mean(dim=1)
+        # --- Conditional pooling ---
+        if self.use_attention and self.attn_type=='self attention':
+            B, N, D = x.shape  # batch, num_nodes, hidden_dim
+            H = self.num_heads
+            d_k = D // H
+
+            Q = self.W_Q(x).view(B, N, H, -1).transpose(1, 2)  # [B, H, N, d_k]
+            K = self.W_K(x).view(B, N, H, -1).transpose(1, 2)  # [B, H, N, d_k]
+            V = self.W_V(x).view(B, N, H, -1).transpose(1, 2)  # [B, H, N, d_k]
+
+            attn_scores = torch.matmul(Q, K.transpose(-2, -1)) / (d_k ** 0.5)  # [B, H, N, N]
+            attn_weights = torch.softmax(attn_scores, dim=-1)                  # attention matrix
+            x = torch.matmul(attn_weights, V)                                  # [B, H, N, d_k]
+
+            x = x.mean(dim=2)                                                  # pool over nodes
+            # x = x.transpose(1, 2).contiguous().view(B, -1)                     # concat heads
+            x = x.reshape(B, -1)
+            x = self.W_out(x)                                                  # [B, D]
+        elif self.use_attention and self.attn_type=='attention pool':
+            att_weights = torch.softmax(self.att_pool(x), dim=1)  # [batch, num_nodes, 1]
+            x = torch.sum(att_weights * x, dim=1)
+        else:
+            x = x.mean(dim=1)  # simple mean pooling
+            
         self.feature_dim = x.shape[-1]
         return x
 

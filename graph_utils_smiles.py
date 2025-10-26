@@ -4,10 +4,13 @@ import torch.nn as nn
 import numpy as np
 import pandas as pd
 import pickle, gzip
+from torch_geometric.data import Data
+from torch_geometric.data import Dataset as pyg_dataset
 from torch.utils.data import Dataset
 from collections import Counter
 from tqdm import tqdm
 from multiprocessing import Pool, cpu_count
+from collections import Counter
 
 from logP_values import *
 
@@ -38,6 +41,7 @@ __all__ = [
     'get_bond_matrix',
     'get_multirelational_bond_matrix',
     'GraphDataset',
+    'SMILEStoPyGGraphDataset',
     'Multirelational_GraphDataset',
     'Multirelational_GraphDataset_Embeddings',
     'SmilesDataset_graph_gen',
@@ -85,7 +89,7 @@ def extract_features_from_smiles(smi):
         pass
 
 
-def list_smiles2symbols_hybridization_chiraltype(smi_list, num_workers=cpu_count()-2):
+def list_smiles2symbols_hybridization_chiraltype(smi_list, num_workers=int(cpu_count()/4)):
     
     """
     Parallel function to extract:
@@ -212,8 +216,10 @@ def get_properties_smiles(smiles):
     '''
         Given a single SMILES it gives the feature representation of that smiles
     '''
-    
-    mol = Chem.MolFromSmiles(smiles)
+    if isinstance(smiles, str):
+        mol = Chem.MolFromSmiles(smiles)
+    else:
+        mol=smiles
     ComputeGasteigerCharges(mol)  # Assign partial charges
     all_properties = [None]*mol.GetNumAtoms()
     if mol is None:
@@ -249,7 +255,10 @@ def get_3d_descriptors(smiles):
     exclusion_flag = False
     atom_descriptors_all = []
     try:
-        mol = Chem.MolFromSmiles(smiles)
+        if isinstance(smiles, str):
+            mol = Chem.MolFromSmiles(smiles)
+        else:
+            mol=smiles
         mol = Chem.AddHs(mol)  # Add hydrogens
         
         params = AllChem.ETKDG()
@@ -413,6 +422,7 @@ def get_atom_info_vector_with_embeddings(smiles,
                          chiraltypes_embedding,
                          ring_embedding,
                          aromatic_embedding,
+                         feature_list=['atom_properties', 'hybridization', 'aromaticity', 'ring', 'logP_values']
                          ):
 
     mol = Chem.MolFromSmiles(smiles)
@@ -675,6 +685,169 @@ def get_multirelational_bond_matrix(smiles, bonds_list, weighted_flag=True, incl
 
     return torch.tensor(bond_matrix)
 
+class SMILEStoPyGGraphDataset(Dataset):
+    def __init__(self,
+                 smi_list,
+                 labels,
+                 atom_symbols,
+                 hybridization_list,
+                 chiraltypes,
+                 bonds_list,
+                 features_list=['atom_properties', 'hybridization', 'aromaticity', 'ring', 'logP_values']):
+        self.smi_list = smi_list
+        self.labels = labels
+        self.atom_symbols = atom_symbols
+        self.hybridization_list = hybridization_list
+        self.chiraltypes = chiraltypes
+        self.bonds_list = bonds_list
+        self.features_list = features_list
+
+    def __len__(self):
+        return len(self.smi_list)
+    
+    def bond_features(self, bond):
+        """Return bond feature vector."""
+        bt = bond.GetBondType()
+        return torch.as_tensor([
+            int(bt == Chem.rdchem.BondType.SINGLE),
+            int(bt == Chem.rdchem.BondType.DOUBLE),
+            int(bt == Chem.rdchem.BondType.TRIPLE),
+            int(bt == Chem.rdchem.BondType.AROMATIC)
+        ], dtype=torch.float)
+    
+    def atom_vector(self, smiles,
+                    atom_symbols,
+                    hybridization_list,
+                    chiraltypes,
+                    bonds_list,
+                    features_list=['atom_properties', 'hybridization', 'aromaticity', 'ring', 'logP_values'],
+                    logP_dict=None):
+        if isinstance(smiles, str):
+            mol = Chem.MolFromSmiles(smiles)
+        else:
+            mol = smiles  # Assume it's already an RDKit Mol object
+        if mol is None:
+            print(f"Invalid SMILES: {smiles}")
+            return {}
+
+        num_atoms = mol.GetNumAtoms()
+        symbol_to_idx = {s: i for i, s in enumerate(atom_symbols)}
+        bond_to_idx = {b: i for i, b in enumerate(bonds_list)}
+        bond_value_dict = {'SINGLE':1, 'DOUBLE':2, 'TRIPLE':3, 'AROMATIC':4}
+
+        # === Preallocate arrays only for requested features ===
+        feature_arrays = {}
+        if 'symbol' in features_list:
+            feature_arrays['symbol'] = np.zeros((num_atoms, len(atom_symbols)), dtype=np.float32)
+        if 'hybridization' in features_list:
+            feature_arrays['hybridization'] = np.zeros((num_atoms, len(hybridization_list)), dtype=np.float32)
+        if 'chirality' in features_list:
+            feature_arrays['chirality'] = np.zeros((num_atoms, len(chiraltypes)), dtype=np.float32)
+        if 'aromaticity' in features_list:
+            feature_arrays['aromaticity'] = np.zeros((num_atoms, 2), dtype=np.float32)
+        if 'ring' in features_list:
+            feature_arrays['ring'] = np.zeros((num_atoms, 2), dtype=np.float32)
+        if 'logP_values' in features_list:
+            feature_arrays['logP_values'] = np.zeros((num_atoms, 1), dtype=np.float32)
+        if 'bond_info' in features_list:
+            feature_arrays['bond_info'] = np.zeros((num_atoms, len(bonds_list)), dtype=np.float32)
+        if 'neigbor_symbol_info' in features_list:
+            feature_arrays['neigbor_symbol_info'] = np.zeros((num_atoms, len(atom_symbols)), dtype=np.float32)
+        if 'neighbour_info' in features_list:
+            feature_arrays['neighbour_info'] = np.zeros((num_atoms, len(atom_symbols)*len(bonds_list)), dtype=np.float32)
+        if 'atom_properties' in features_list:
+            atom_properties_mol = np.array(get_properties_smiles(smiles), dtype=np.float32)
+            feature_arrays['atom_properties'] = atom_properties_mol
+            feature_arrays['rdkit_2d_atom_prop'] = atom_properties_mol[:, :10]
+            feature_arrays['electronegetivity_infos'] = atom_properties_mol[:, 10:-1]
+            feature_arrays['gasteiger_charge'] = atom_properties_mol[:, -1:]
+
+        # === Iterate over atoms ===
+        for i, atom in enumerate(mol.GetAtoms()):
+            if 'symbol' in features_list:
+                feature_arrays['symbol'][i] = list_to_onehot(atom.GetSymbol(), atom_symbols)
+            if 'chirality' in features_list:
+                feature_arrays['chirality'][i] = list_to_onehot(str(atom.GetChiralTag()), chiraltypes)
+            if 'hybridization' in features_list:
+                feature_arrays['hybridization'][i] = list_to_onehot(str(atom.GetHybridization()), hybridization_list)
+            if 'aromaticity' in features_list:
+                feature_arrays['aromaticity'][i, int(atom.GetIsAromatic())] = 1.0
+            if 'ring' in features_list:
+                feature_arrays['ring'][i, int(atom.IsInRing())] = 1.0
+            if 'logP_values' in features_list and logP_dict is not None:
+                feature_arrays['logP_values'][i] = get_logP_from_csv(logp_dict=logP_dict, mol=mol, atom_idx=i)
+
+            neighbors = atom.GetNeighbors()
+            if neighbors:
+                neighbor_symbols = [n.GetSymbol() for n in neighbors]
+                bonds = [str(mol.GetBondBetweenAtoms(atom.GetIdx(), n.GetIdx()).GetBondType()) for n in neighbors]
+                neighbor_count = Counter(neighbor_symbols)
+                bond_count = Counter(bonds)
+
+                if 'neigbor_symbol_info' in features_list:
+                    for neigh in neighbor_count:
+                        feature_arrays['neigbor_symbol_info'][i, symbol_to_idx[neigh]] = float(neighbor_count[neigh])
+                if 'bond_info' in features_list:
+                    for b in bond_count:
+                        feature_arrays['bond_info'][i, bond_to_idx[b]] = float(bond_count[b])
+                if 'neighbour_info' in features_list:
+                    temp_matrix = np.zeros((len(atom_symbols), len(bonds_list)), dtype=np.float32)
+                    for nsym, bond_type in zip(neighbor_symbols, bonds):
+                        temp_matrix[symbol_to_idx[nsym], bond_to_idx[bond_type]] = bond_value_dict[bond_type] * neighbor_count[nsym]
+                    feature_arrays['neighbour_info'][i] = temp_matrix.flatten()
+
+        return feature_arrays
+
+
+    def mol_to_graph(self, smiles, add_Hs = False):
+        """Convert a SMILES string into a PyG Data graph."""
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            return None
+
+        # Add hydrogens (optional)
+        if add_Hs:
+            mol = Chem.AddHs(mol)
+
+        # Node features
+        atom_features = self.atom_vector(mol, 
+                                         atom_symbols=self.atom_symbols,
+                                         hybridization_list=self.hybridization_list,
+                                         chiraltypes=self.chiraltypes,
+                                         bonds_list=self.bonds_list,
+                                         features_list=self.features_list
+                                         )
+        atom_features = np.concatenate([atom_features[key] for key in self.features_list], axis=1)
+        x = torch.as_tensor(atom_features, dtype=torch.float)
+        # x = torch.stack([atom_vector(atom) for atom in mol.GetAtoms()])
+
+        # Edges
+        edge_index = []
+        edge_attr = []
+        for bond in mol.GetBonds():
+            i = bond.GetBeginAtomIdx()
+            j = bond.GetEndAtomIdx()
+            f = self.bond_features(bond)
+
+            edge_index.append([i, j])
+            edge_index.append([j, i])  # undirected
+            edge_attr.append(f)
+            edge_attr.append(f)
+
+        edge_index = torch.as_tensor(edge_index, dtype=torch.long).t().contiguous()
+        edge_attr = torch.stack(edge_attr) if len(edge_attr) > 0 else None
+
+        data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
+        return data
+
+    def __getitem__(self, idx):
+        smiles = self.smi_list[idx]
+        graph = self.mol_to_graph(smiles)
+        if graph is None:
+            return None
+        if self.labels is not None:
+            graph.labels = torch.as_tensor([self.labels[idx]], dtype=torch.float)
+        return graph
 
 class GraphDataset(Dataset):
     def __init__(self, smi_list, labels, max_num_atoms, atom_symbols, hybridization_list, chiraltypes, bonds_list):
@@ -724,13 +897,59 @@ class Multirelational_GraphDataset(Dataset):
     def __len__(self):
         return len(self.smi_list)
 
-    def __getitem__(self, idx):
+    def _get_one(self, idx):
         
         smi = self.smi_list[idx]
         atom_feature_vector, adjacency_tensor, degree_tensor = self.smi2feature(smi)
         y  = self.labels[idx]
+        adjacency_tensor = adjacency_tensor.cpu().numpy()
+        degree_tensor = degree_tensor.cpu().numpy()
         
         return smi, atom_feature_vector, adjacency_tensor, degree_tensor, y
+    
+    def __getitem__(self, idx):
+        if isinstance(idx, (slice, list, tuple)):  
+            if isinstance(idx, slice):
+                indices = range(*idx.indices(len(self)))
+                print(len(self))
+            else:
+                indices = idx
+            items = [self._get_one(i) for i in indices]
+            return self.collate_fn(items)
+        return self._get_one(idx)
+    
+    @staticmethod
+    def collate_fn(batch):
+        """
+        Collate a list of (smi, atom_feature_dict, adjacency_matrix, degree_matrix, y)
+        into numpy arrays (safe for multiprocessing).
+        """
+        smi_list, atom_feature_dicts, adjacency_tensors, degree_tensors, ys = zip(*batch)
+
+        smi_list = list(smi_list)
+
+        # --- collate atom feature dicts ---
+        feature_keys = atom_feature_dicts[0].keys()
+        atom_feature_vectors = {}
+        for key in feature_keys:
+            try:
+                atom_feature_vectors[key] = np.stack([afd[key] for afd in atom_feature_dicts], axis=0).astype(np.float32)
+            except ValueError:
+                # if shapes differ across molecules, keep as list
+                atom_feature_vectors[key] = [afd[key].astype(np.float32) for afd in atom_feature_dicts]
+
+        # --- collate adjacency, degree, labels ---
+        adjacency_tensors = np.array(adjacency_tensors, dtype=np.float32)
+        degree_tensors    = np.array(degree_tensors, dtype=np.float32)
+        ys                = np.array(ys, dtype=np.float32)
+        return_vals = {'smiles':smi_list,
+                       'atom_feature_vectors':atom_feature_vectors,
+                       'adjacency_tensors':adjacency_tensors,
+                       'degree_tensors':degree_tensors,
+                       'labels':ys,
+                       }
+        
+        return return_vals
     
     def smi2feature(self, smi):
         
@@ -789,9 +1008,64 @@ class Multirelational_GraphDataset_Embeddings(Dataset):
     def __len__(self):
         return len(self.smi_list)
 
-    def __getitem__(self, idx):
+    def _get_one(self, idx):
         
         smi = self.smi_list[idx]
+        atom_feature_vector, adjacency_tensor, degree_tensor = self.smi2feature(smi)
+        y  = self.labels[idx]
+        
+        ## Changing to numpy for consistency with Multiprocessing (To aviod "OSError: To many opening file")
+        adjacency_tensor = adjacency_tensor.cpu().numpy()
+        degree_tensor = degree_tensor.cpu().numpy()
+        
+        return smi, atom_feature_vector, adjacency_tensor, degree_tensor, y
+    
+    def __getitem__(self, idx):
+        if isinstance(idx, (slice, list, tuple)):  
+            if isinstance(idx, slice):
+                indices = range(*idx.indices(len(self)))
+                print(len(self))
+            else:
+                indices = idx
+            items = [self._get_one(i) for i in indices]
+            return self.collate_fn(items)
+        return self._get_one(idx)
+    
+    @staticmethod
+    def collate_fn(batch):
+        """
+        Collate a list of (smi, atom_feature_dict, adjacency_matrix, degree_matrix, y)
+        into numpy arrays (safe for multiprocessing).
+        """
+        smi_list, atom_feature_dicts, adjacency_tensors, degree_tensors, ys = zip(*batch)
+
+        smi_list = list(smi_list)
+
+        # --- collate atom feature dicts ---
+        feature_keys = atom_feature_dicts[0].keys()
+        atom_feature_vectors = {}
+        for key in feature_keys:
+            try:
+                atom_feature_vectors[key] = np.stack([afd[key] for afd in atom_feature_dicts], axis=0).astype(np.float32)
+            except ValueError:
+                # if shapes differ across molecules, keep as list
+                atom_feature_vectors[key] = [afd[key].astype(np.float32) for afd in atom_feature_dicts]
+
+        # --- collate adjacency, degree, labels ---
+        adjacency_tensors = np.array(adjacency_tensors, dtype=np.float32)
+        degree_tensors    = np.array(degree_tensors, dtype=np.float32)
+        ys                = np.array(ys, dtype=np.float32)
+        return_vals = {'smiles':smi_list,
+                            'atom_feature_vectors':atom_feature_vectors,
+                            'adjacency_tensors':adjacency_tensors,
+                            'degree_tensors':degree_tensors,
+                            'labels':ys,
+                            }
+        
+        return return_vals
+    
+    def smi2features(self, smi):
+        
         atom_feature_vector = get_atom_info_vector_with_embeddings(smiles=smi,
                                                  atom_symbols_embedding=self.atom_symbols_embedding,
                                                  hybridization_embedding=self.hybridization_embedding,
@@ -809,9 +1083,8 @@ class Multirelational_GraphDataset_Embeddings(Dataset):
         if not self.bond_weight_flag:
             mask = degree_tensor != 0.0
             degree_tensor[mask] = degree_tensor[mask] - 1
-        y  = self.labels[idx]
         
-        return smi, atom_feature_vector, adjacency_tensor, degree_tensor, y
+        return atom_feature_vector, adjacency_tensor, degree_tensor
             
 def process_single_sample(data_point):
         
@@ -835,14 +1108,26 @@ def limit_open_files(n=4096):
     new_soft = min(n, hard)
     resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, hard))  
          
-def SmilesDataset_graph_gen(split, dataset, out_path = 'SmilesDataset_graph', mean_std_flag = False, num_workers=cpu_count()-2, chunksize=10000, filetype='zip'):
+def SmilesDataset_graph_gen(split, dataset, out_path = 'SmilesDataset_graph', mean_std_flag = False, num_workers=int(cpu_count()/4), chunksize=1000, filetype='zip'):
     
+    # with Pool(num_workers) as pool:
+    #     print('in pool loop:')
+    #     raw_data = [dataset[i] for i in tqdm(range(len(dataset)))]
+    #     SmilesDataset_graph = list(tqdm(pool.imap(process_single_sample, raw_data, chunksize=chunksize),
+    #                                     total=len(raw_data), desc=split))
+        
     with Pool(num_workers) as pool:
-        SmilesDataset_graph = list(tqdm(pool.imap_unordered(process_single_sample, dataset, chunksize=chunksize),
-                                        total=len(dataset), desc=split))
+        print('in pool loop:')
+        SmilesDataset_graph = list(
+                                tqdm(
+                                    pool.imap(process_single_sample, (dataset[i] for i in range(len(dataset))), chunksize=chunksize),
+                                    total=len(dataset),
+                                    desc=split
+                                )
+                            )
     
     # Filter out None values
-    SmilesDataset_graph = [d for d in SmilesDataset_graph if d is not None]
+    # SmilesDataset_graph = [d for d in SmilesDataset_graph if d is not None]
     if filetype == 'zip':
         filename = out_path + '_' + split + '.pkl.gz'
         with gzip.open(filename, "wb") as outfile:
@@ -942,12 +1227,55 @@ class GraphData_from_pickle(Dataset):
     def __len__(self):
         return len(self.dataset)
 
-    def __getitem__(self, idx):
+    def _get_one(self, idx):
         
         data=self.dataset[idx]
         feature_vector, adjacency_matrix, degree_matrix, y = self.smi2feature(data)
         
         return feature_vector, adjacency_matrix, degree_matrix, y
+    
+    def __getitem__(self, idx):
+        if isinstance(idx, (slice, list, tuple)):  
+            if isinstance(idx, slice):
+                indices = range(*idx.indices(len(self)))
+            else:
+                indices = idx
+            items = [self._get_one(i) for i in indices]
+            return self.collate_fn(items)
+        return self._get_one(idx)
+    
+    def collate_fn(self, batch):
+        """
+        Collate a list of (feature_vector, adjacency_matrix, degree_matrix, y)
+        into batched tensors.
+        """
+        feature_vectors, adjacency_matrices, degree_matrices, ys = zip(*batch)
+
+        # Convert to torch tensors
+        feature_vectors   = [torch.as_tensor(fv, dtype=torch.float32) for fv in feature_vectors]
+        adjacency_matrices = [torch.as_tensor(adj, dtype=torch.float32) for adj in adjacency_matrices]
+        degree_matrices    = [torch.as_tensor(deg, dtype=torch.float32) for deg in degree_matrices]
+        ys                 = [torch.as_tensor(y, dtype=torch.float32) for y in ys]
+
+        # If feature vectors are already same shape → stack, else keep as list
+        try:
+            feature_vectors = torch.stack(feature_vectors, dim=0)
+        except RuntimeError:
+            pass  # keep list if shapes differ
+
+        try:
+            adjacency_matrices = torch.stack(adjacency_matrices, dim=0)
+        except RuntimeError:
+            pass
+
+        try:
+            degree_matrices = torch.stack(degree_matrices, dim=0)
+        except RuntimeError:
+            pass
+
+        ys = torch.stack(ys, dim=0)
+
+        return feature_vectors, adjacency_matrices, degree_matrices, ys
     
     def smi2feature(self, data):
         
@@ -965,21 +1293,27 @@ class GraphData_from_pickle(Dataset):
         
         try:
             atom_feature_vector = np.concatenate(features, axis=1)
-            atom_feature_vector = torch.from_numpy(atom_feature_vector)
         except:
             raise ValueError(f'Error found in: SMILES - {data['SMILES']}, Features - {atom_feature_vector}')
         
-        dataset_mean = np.concatenate(mean)
-        dataset_std = np.concatenate(std)
-        if self.padding: 
-            feature_vector = torch.zeros((self.max_num_atoms, atom_feature_vector.shape[-1]))
-            feature_vector[:len(atom_feature_vector)] = (atom_feature_vector - dataset_mean)/dataset_std
+         # Convert to tensor
+        atom_feature_vector = torch.from_numpy(atom_feature_vector).float()
+        
+        # --- prepare mean/std tensors ---
+        dataset_mean = torch.from_numpy(np.concatenate(mean)).float()
+        dataset_std  = torch.from_numpy(np.concatenate(std)).float()
+        
+        # --- normalize and pad if needed ---
+        if self.padding:
+            feature_vector = torch.zeros((self.max_num_atoms, atom_feature_vector.shape[1]), dtype=torch.float32)
+            feature_vector[:atom_feature_vector.shape[0], :] = (atom_feature_vector - dataset_mean) / dataset_std
         else:
-            atom_feature_vector = (atom_feature_vector - dataset_mean)/dataset_std
-            
-        adjacency_matrix = data['adjacency_matrix']
-        degree_matrix = data['degree_matrix']
-        y  = data['label']
+            feature_vector = (atom_feature_vector - dataset_mean) / dataset_std
+        
+        # --- get adjacency, degree, label ---
+        adjacency_matrix = torch.from_numpy(data['adjacency_matrix']).float()
+        degree_matrix    = torch.from_numpy(data['degree_matrix']).float()
+        y                = torch.tensor(data['label'], dtype=torch.float32)
         
         return feature_vector, adjacency_matrix, degree_matrix, y
     
@@ -1023,7 +1357,11 @@ class GraphData_from_pickle_3d_descriptor(Dataset):
         return feature_vector, adjacency_matrix, degree_matrix, descriptors_3d, y
     
     
-def feature_representation(dataset, model, device):
+def feature_representation(dataset,
+                           model,
+                           device='cpu',
+                           input_params = ["feature_vector", "adjacency_tensor", "degree_tensor", "labels"]
+                           ):
     
     '''
     dataset: A dataset with first entry of every datapoint is a SMILES
@@ -1041,7 +1379,7 @@ def feature_representation(dataset, model, device):
     model.eval()
     with torch.no_grad():  
         for i, data in tqdm(enumerate(dataset), total=len(dataset), desc=f'Feature Extraction: '):
-            batch = {k: torch.tensor(v).to(device).unsqueeze(0) for k, v in data.items()}
+            batch = {k: torch.tensor(v).to(device).unsqueeze(0) for k, v in zip(input_params, data)}
             targets = batch.pop('labels').squeeze()
             outputs = model(**batch)
 
@@ -1238,7 +1576,7 @@ class weights_initilizer():
            (isinstance(m, nn.Conv1d)) or (isinstance(m, nn.ConvTranspose1d)) or \
            (isinstance(m, nn.Conv2d)) or (isinstance(m, nn.ConvTranspose2d)) or \
            (isinstance(m, nn.Conv3d)) or (isinstance(m, nn.ConvTranspose3d)) or \
-           (isinstance(m, nn.BatchNorm1d)) or \
+        #    (isinstance(m, nn.BatchNorm1d)) or \
            (isinstance(m, nn.BatchNorm2d)) or \
            (isinstance(m, nn.BatchNorm3d))):
             torch.nn.init.xavier_normal_(m.weight)
