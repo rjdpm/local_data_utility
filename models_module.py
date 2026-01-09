@@ -3,6 +3,7 @@ import inspect
 import numpy as np
 import math, os, pickle, sys
 from collections import OrderedDict
+from typing import List, Tuple, Optional, Dict, Set
 
 import torch
 from torch import nn
@@ -15,7 +16,7 @@ from transformers import RobertaModel, RobertaPreTrainedModel
 from transformers import AutoModel, AutoConfig
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from Generalised_data_utils import auto_repr, collect_class_definitions
+from Generalised_data_utils import auto_repr, collect_class_definitions, check_tensor
 
 __all__ = [
     'network_pyfile',
@@ -41,6 +42,7 @@ __all__ = [
     'TFT',
     'LSTMnetwork',
     'SMILESLinearNet',
+    'FusionNet',
     'GCNLayer',
     'GCN',
     'GCN_Connected',
@@ -102,6 +104,7 @@ def activation_func(name='relu', alpha=1.0, negative_slope=1e-2):
         raise ValueError(f'Unsupported activation function: "{name}"')
     
 
+
 def make_mlp(list_dims, dropout=0.0, act_func='relu', norm_type='layer', alpha=1.0, negative_slope=1e-2):
     
     """
@@ -132,7 +135,7 @@ def make_mlp(list_dims, dropout=0.0, act_func='relu', norm_type='layer', alpha=1
 
     # Standardize act_func to a list of activation layers
     num_layers = len(list_dims) - 1
-    if act_func is None:
+    if act_func is None or not act_func:
         act_funcs = [nn.Identity()] * (num_layers - 1)
     elif isinstance(act_func, str):
         act_funcs = [activation_func(act_func, alpha=alpha, negative_slope=negative_slope)] * (num_layers - 1)
@@ -154,7 +157,7 @@ def make_mlp(list_dims, dropout=0.0, act_func='relu', norm_type='layer', alpha=1
                     layers.append(nn.BatchNorm1d(out_dim))
                 elif norm_type == 'layer':
                     layers.append(nn.LayerNorm(out_dim))
-                elif norm_type == 'NA':
+                elif (norm_type == 'NA') or (norm_type is None):
                     layers.append(nn.Identity())
                 elif norm_type is not None:
                     raise ValueError(f"Unsupported normalization type: {norm_type}")
@@ -1356,9 +1359,13 @@ class SMILESLinearNet(nn.Module):
         - Tensor of shape [batch_size, output_dim] after passing through linear layers.
     """
     def __init__(self, list_dims, dropout=0.2, act_func='relu', norm_type='layer'):
-        super(SMILESLinearNet, self).__init__()
+        super().__init__()
         
         self.class_def = inspect.getsource(self.__class__)
+        self.list_dims = list_dims
+        self.dropout = dropout
+        self.act_func = act_func
+        self.norm_type = norm_type
         self.network_pyfile = network_pyfile
         self.MLP = make_mlp(list_dims=list_dims,
                             dropout=dropout,
@@ -1388,7 +1395,62 @@ class SMILESLinearNet(nn.Module):
         """
         return self.MLP(x)
 
+class FusionNet(nn.Module):
+    def __init__(self,
+                 input_dims,        # list or tuple of input sizes, e.g., [91, 384, 300, 256]
+                 fusion_dim=256,
+                 mlp_params=None):
+        """
+        input_dims: list of input feature dimensions for each modality.
+        fusion_dim: projection size for each input modality.
+        mlp_params: parameters to build final MLP (must include output dim).
+        """
+        super().__init__()
 
+        self.input_dims = input_dims
+        self.fusion_dim = fusion_dim
+        self.mlp_params = mlp_params
+        
+        # Create projection layers dynamically
+        self.projections = nn.ModuleList([nn.Linear(dim, fusion_dim) for dim in input_dims])
+
+        # Final projection after concatenation
+        self.final_proj = nn.Linear(fusion_dim * len(input_dims), fusion_dim)
+        self.norm = nn.LayerNorm(fusion_dim * len(input_dims))
+        self.dropout = nn.Dropout(p=0.3)
+
+        # MLP for prediction
+        self.mlp = make_mlp(**mlp_params)
+
+    def __repr__(self):
+        return auto_repr(self)
+
+    def feature_repr(self, modalities):
+        """
+        modalities: variable number of tensors.
+                    Each tensor shape -> [batch, input_dim_i]
+        """
+        assert len(modalities) == len(self.projections), \
+            f"Expected {len(self.projections)} inputs but received {len(modalities)}."
+
+        # Project each modality to fusion dimension
+        projected = [proj(mod) for proj, mod in zip(self.projections, modalities)]
+
+        # Concatenate all projected features
+        fused = torch.cat(projected, dim=-1)
+        fused = self.norm(fused)
+        fused = F.tanh(fused)
+        fused = self.dropout(fused)
+
+        # Final fusion projection + dropout
+        fused = self.final_proj(fused)
+
+        return fused
+
+    def forward(self, modalities):
+        x = self.feature_repr(modalities)
+        return self.mlp(x)
+    
 class GCNLayer(nn.Module):
     """
     Task:
@@ -1803,8 +1865,8 @@ class MRGCN(nn.Module):
     def __init__(self,
                  list_dims_gcn,
                  list_dims_fc,
-                 dropout,
                  max_num_atom,
+                 dropout = 0.2,
                  num_relations=4,
                  act_func='relu',
                  act_func_gcn='relu',
@@ -1812,7 +1874,7 @@ class MRGCN(nn.Module):
                  alpha=1.0,
                  negative_slope=1e-2,
                  use_attention=False,       # <--- flag for QK^T V
-                 attn_type='attention pool',#'self attention',#            
+                 attn_type='self attention',# 'attention pool',#           
                  attn_dim=None,            # <--- dimension of attention projection
                  num_heads=1):             # <--- optional multi-head attention
         super().__init__()
@@ -1850,7 +1912,10 @@ class MRGCN(nn.Module):
             self.W_V = nn.Linear(hidden_dim, attn_dim * num_heads)
             self.W_out = nn.Linear(attn_dim * num_heads, hidden_dim)
         if self.use_attention and self.attn_type=='attention pool':
-            self.att_pool = nn.Linear(hidden_dim, 1)
+            # self.att_pool = nn.Linear(hidden_dim, 1)
+            self.att_pool = nn.Sequential(nn.Linear(hidden_dim, hidden_dim // 2),
+                                          nn.Tanh(), nn.Linear(hidden_dim // 2, 1)
+                                          )
 
         # Fully connected layers
         self.dropout = nn.Dropout(dropout)
@@ -1865,7 +1930,7 @@ class MRGCN(nn.Module):
     def __repr__(self):
         return auto_repr(self)
 
-    def get_features(self, x, adjacency_tensor, degree_tensor):
+    def get_features(self, feature_vector, adjacency_tensor, degree_tensor, feature_mask=1.0, adjacency_mask=1.0):
         """
         Task:
             Extract graph-level features from multi-relational input.
@@ -1878,9 +1943,20 @@ class MRGCN(nn.Module):
         Outputs:
             - Tensor: Aggregated graph features [batch_size, gcn_out_dim]
         """
+        feature_vector = feature_vector * feature_mask
+        adjacency_tensor = adjacency_tensor * adjacency_mask
+        degree_tensor = degree_tensor * adjacency_mask
+
+        # import time
+        # time.sleep(1)
+        # check_tensor(feature_vector, "feature_vector")
+        # check_tensor(adjacency_tensor, "adjacency_tensor")
+        # check_tensor(degree_tensor, "degree_tensor")
+
         adjacency_tensor = normalize_adjacency(adjacency=adjacency_tensor,
                                                degree=degree_tensor
                                                )
+        x = feature_vector
         for i, gcn_layer in enumerate(self.gcn_layers):
             x = gcn_layer(x, adjacency_tensor)
             if i < len(self.gcn_layers) - 1:
@@ -1903,7 +1979,7 @@ class MRGCN(nn.Module):
             x = torch.matmul(attn_weights, V)                                  # [B, H, N, d_k]
 
             x = x.mean(dim=2)                                                  # pool over nodes
-            # x = x.transpose(1, 2).contiguous().view(B, -1)                     # concat heads
+            x = x.transpose(1, 2).contiguous().view(B, -1)                     # concat heads
             x = x.reshape(B, -1)
             x = self.W_out(x)                                                  # [B, D]
         elif self.use_attention and self.attn_type=='attention pool':
@@ -1915,7 +1991,7 @@ class MRGCN(nn.Module):
         self.feature_dim = x.shape[-1]
         return x
 
-    def forward(self, feature_vector, adjacency_tensor, degree_tensor):
+    def forward(self, feature_vector, adjacency_tensor, degree_tensor, feature_mask=1.0, adjacency_mask=1.0):
         """
         Task:
             Forward pass from graph input to final prediction via GCN and FC layers.
@@ -1924,11 +2000,14 @@ class MRGCN(nn.Module):
             - x: Node features
             - adjacency_tensor: Multi-relational adjacency
             - degree_tensor: Node degree tensor
+            - feature_mask (float or Tensor): Mask to apply on features
+            - adjacency_mask (float or Tensor): Mask to apply on adjacency
 
         Outputs:
             - Tensor: Final prediction/representation
         """
-        x = self.get_features(feature_vector, adjacency_tensor, degree_tensor)
+        x = self.get_features(feature_vector, adjacency_tensor, degree_tensor,
+                              feature_mask=feature_mask, adjacency_mask=adjacency_mask)
         # x = x.mean(dim=1).unsqueeze(1)
         x = self.fc_conn(x)
         x = self.input2repr(x)
@@ -2046,6 +2125,8 @@ class ChemBERTa(nn.Module):
         self.act_func = act_func
         self.norm_type = norm_type
         self.config = AutoConfig.from_pretrained(model_name)
+        self.config.output_hidden_states = True
+        self.config.output_attentions = True
         self.chemberta = AutoModel.from_pretrained(model_name, config=self.config)
         
         self.hidden_size = self.config.hidden_size
@@ -2068,7 +2149,7 @@ class ChemBERTa(nn.Module):
         outputs = self.chemberta(input_ids=input_ids, attention_mask=attention_mask)
         token_embed = outputs.last_hidden_state  # [B, T, H]
 
-        return token_embed
+        return token_embed, outputs
 
     def embeddings(self, input_ids, attention_mask, **kwargs):
         """
@@ -2082,7 +2163,7 @@ class ChemBERTa(nn.Module):
         Output:
             Tensor: Mean pooled embedding of shape [B, H].
         """
-        token_embed = self.token_embeddings(input_ids=input_ids, attention_mask=attention_mask)
+        token_embed, _ = self.token_embeddings(input_ids=input_ids, attention_mask=attention_mask)
         x = token_embed[:, 0]  # CLS token
         
         return x
@@ -2138,11 +2219,12 @@ class ChemBERTaRegressor(ChemBERTa):
         self.model_name = model_name
         self.dropout = dropout
         self.act_func = act_func
+        self.list_dims = list_dims
         self.norm_type = norm_type
 
         self.hidden_size = self.config.hidden_size
-        self.list_dims = [self.hidden_size, ] + list_dims
-        self.regressor = make_mlp(list_dims=self.list_dims, dropout=self.dropout, act_func=self.act_func, norm_type=self.norm_type)
+        list_dims = [self.hidden_size, ] + list_dims
+        self.regressor = make_mlp(list_dims=list_dims, dropout=self.dropout, act_func=self.act_func, norm_type=self.norm_type)
         
     
     def embeddings(self, input_ids, attention_mask, **kwargs):
@@ -2157,7 +2239,7 @@ class ChemBERTaRegressor(ChemBERTa):
         Output:
             Tensor: Mean pooled embedding of shape [B, H].
         """
-        token_embed = self.token_embeddings(input_ids=input_ids, attention_mask=attention_mask)
+        token_embed, _ = self.token_embeddings(input_ids=input_ids, attention_mask=attention_mask)
         masked_embed = (token_embed * attention_mask.unsqueeze(-1)).sum(1)
         denom = attention_mask.sum(1, keepdim=True).clamp(min=1e-6)
         x = masked_embed / denom  # mean pooling
@@ -2225,7 +2307,7 @@ class ChemBERTaRegressorwithAttention(ChemBERTaRegressor):
             self.position_embeddings = nn.Embedding(max_position_embeddings, hidden_dim)
 
     def token_embeddings(self, input_ids, attention_mask):
-        token_embed = super().token_embeddings(input_ids=input_ids, attention_mask=attention_mask)  # [B, T, H]
+        token_embed, _ = super().token_embeddings(input_ids=input_ids, attention_mask=attention_mask)  # [B, T, H]
 
         if self.max_position_embeddings > 0:
             B, T = input_ids.size()
@@ -2236,7 +2318,7 @@ class ChemBERTaRegressorwithAttention(ChemBERTaRegressor):
         return token_embed
 
     def embeddings(self, input_ids, attention_mask, **kwargs):
-        embed = self.token_embeddings(input_ids=input_ids, attention_mask=attention_mask)  # [B, T, H]
+        embed, _ = self.token_embeddings(input_ids=input_ids, attention_mask=attention_mask)  # [B, T, H]
 
         # Convert attention_mask to key_padding_mask (True = ignore, False = attend)
         key_padding_mask = ~attention_mask.bool()  # [B, T]
@@ -2320,7 +2402,7 @@ class ChemBERTaRegressorwithMultiheadAttention(ChemBERTaRegressor):
         self.attn_layer = nn.Linear(self.config.hidden_size, 1)
         
     def token_embeddings(self, input_ids, attention_mask):
-        token_embed = super().token_embeddings(input_ids=input_ids, attention_mask=attention_mask)# [B, T, H]
+        token_embed, _ = super().token_embeddings(input_ids=input_ids, attention_mask=attention_mask)# [B, T, H]
 
         if self.max_position_embeddings>0:
             # Add positional embeddings
@@ -2334,7 +2416,7 @@ class ChemBERTaRegressorwithMultiheadAttention(ChemBERTaRegressor):
         
     def embeddings(self, input_ids, attention_mask, **kwargs):
         
-        embed = self.token_embeddings(input_ids=input_ids, attention_mask=attention_mask)# [B, T, H]
+        embed, _ = self.token_embeddings(input_ids=input_ids, attention_mask=attention_mask)# [B, T, H]
         # print(f'embed.shape = {embed.shape}')
         if isinstance(self.num_heads, int) and self.num_heads > 0:
             embed, attn_weights = self.multihead_attn(x=embed, mask=attention_mask)
@@ -2427,7 +2509,7 @@ class ChemBERTaRegressorwithLSTM(ChemBERTa):
         Output:
             Tensor: LSTM output embedding [B, H] where H depends on bidirectionality.
         """
-        token_embed = self.token_embeddings(input_ids=input_ids, attention_mask=attention_mask)  # [B, T, H]
+        token_embed, _ = self.token_embeddings(input_ids=input_ids, attention_mask=attention_mask)  # [B, T, H]
         lengths = attention_mask.sum(dim=1).cpu()
         packed_input = nn.utils.rnn.pack_padded_sequence(token_embed, lengths, batch_first=True, enforce_sorted=False)
         packed_output, (hn, cn) = self.lstm(packed_input)
@@ -2527,7 +2609,7 @@ class ChemBERTaRegressorRNN(ChemBERTa):
         Output:
             Tensor: [B, H]
         """
-        token_embed = self.token_embeddings(input_ids=input_ids, attention_mask=attention_mask)
+        token_embed, _ = self.token_embeddings(input_ids=input_ids, attention_mask=attention_mask)
         lengths = attention_mask.sum(dim=1).cpu()
 
         packed_input = nn.utils.rnn.pack_padded_sequence(token_embed, lengths, batch_first=True, enforce_sorted=False)
@@ -2840,16 +2922,24 @@ class GeneralizedAdditiveAttention(nn.Module):
         return context, attn_weights
     
 class GeneralizedDotProductAttention(nn.Module):
-    def __init__(self, input_dim, hidden_dim, proj_dims=[128], proj_qkv=True, dropout=0.0, reduce='none'):
+    def __init__(self, input_dim,
+                 hidden_dim,
+                 proj_dims=[128],
+                 proj_qkv=True,
+                 proj_qkv_act_func: str = None,
+                 proj_qkv_norm_type: str = None,
+                 dropout=0.0,
+                 reduce_='none'
+                 ):
         super().__init__()
-        self.reduce = reduce
+        self.reduce = reduce_
         self.scale = hidden_dim ** 0.5
 
         if proj_qkv:
             proj_layers = proj_dims + [hidden_dim]
-            self.q_proj = make_mlp([input_dim] + proj_layers, dropout=dropout)
-            self.k_proj = make_mlp([input_dim] + proj_layers, dropout=dropout)
-            self.v_proj = make_mlp([input_dim] + proj_layers, dropout=dropout)
+            self.q_proj = make_mlp([input_dim] + proj_layers, dropout=dropout, act_func=proj_qkv_act_func, norm_type=proj_qkv_norm_type)
+            self.k_proj = make_mlp([input_dim] + proj_layers, dropout=dropout, act_func=proj_qkv_act_func, norm_type=proj_qkv_norm_type)
+            self.v_proj = make_mlp([input_dim] + proj_layers, dropout=dropout, act_func=proj_qkv_act_func, norm_type=proj_qkv_norm_type)
         else:
             self.q_proj = nn.Identity()
             self.k_proj = nn.Identity()

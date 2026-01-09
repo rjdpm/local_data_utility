@@ -41,810 +41,835 @@ __all__ = ['Mol2VecDataset',
            'DescriptorsDataset',
            'ChemBertDataset'
            ]
-    
-    
-def partition_data(df_init,
-                  partition_col,
-                  partition_labels = ['Tr', 'Val', 'Te']):
-        
-    train_data = df_init[df_init[partition_col] == partition_labels[0]]
-    val_data = df_init[df_init[partition_col] == partition_labels[1]]
-    test_data = df_init[df_init[partition_col] == partition_labels[2]]
-    
-    return train_data, val_data, test_data
+
+PARTITION_NAMES = {'Tr':'train', 'Te':'test', 'Val':'val'}
+
+def split_data(df, partition_col, partition_labels=None):
+        """
+        Build partitions from the dataframe.
+        If partition_labels is None, use all unique labels found.
+        """
+        partitions = OrderedDict({})
+        if partition_labels is None:
+            partition_labels = df[partition_col].unique().tolist()
+
+        for p in partition_labels:
+            partitions[p] = df[df[partition_col] == p].reset_index(drop=True)
+            
+        return partitions
 
 def ensure_2d(y: np.ndarray) -> np.ndarray:
     """Ensure y is 2D: (n,) -> (n,1), (n,k) -> (n,k)."""
     y = np.asarray(y)
     return y.reshape(-1, 1) if y.ndim == 1 else y
 
-class Mol2VecDataset:
+def atom_filter(df, smiles_column_name='Cannonicalised_SMILES',
+                max_num_atoms = 100,
+                all_atoms={'Br','Cl','P','I','F','H','S','N','O','C','B','Si','Na','K'}):
     
-    def __init__(self, df_init, 
-                partition_col,
-                smiles_column_name,
-                target_column_name,
-                mol2vec_dataset_path
-                ):
+    mask = []
+    for smi in df[smiles_column_name]:
+        try:
+            mol = Chem.MolFromSmiles(smi)
+            if mol is None:
+                mask.append(False); continue
+            symbols = {a.GetSymbol() for a in mol.GetAtoms()}
+            mask.append(symbols.issubset(all_atoms) and (5 <= mol.GetNumAtoms() <= max_num_atoms))
+        except:
+            mask.append(False)
+    df = df[np.array(mask)]
+    
+    return df
+        
+
+def apply_column_constraints(df, filters):
+    
+    ops = {
+        "==": operator.eq, "!=": operator.ne,
+        "<": operator.lt, "<=": operator.le,
+        ">": operator.gt, ">=": operator.ge,
+        "between": lambda col, b: col.between(b[0], b[1])
+    }
+    mask = np.ones(len(df), dtype=bool)
+    for col, rel, ref in filters:
+        mask &= ops[rel](df[col], ref)
+    df = df[mask]
+    
+    return df
+
+
+class Mol2VecDataset:
+
+    def __init__(self,
+                 df_init,
+                 partition_col,
+                 smiles_column_name,
+                 target_column_name,
+                 mol2vec_dataset_path,
+                 mol2vec_model_path = "/home/rkmvu/Codes/CL_int/Mol2Vec_representation/model_300dim.pkl"
+                 ):
+
         self.df = df_init.copy()
-        self.smiles_column_name =smiles_column_name
-        self.target_column_name =target_column_name
-        self.mol2vec_dataset_path =mol2vec_dataset_path
-        self.partition_col =partition_col
-        self.train_data, self.val_data, self.test_data = None, None, None
+        self.partition_col = partition_col
+        self.smiles_column_name = smiles_column_name
+        self.target_column_name = target_column_name
+        self.mol2vec_dataset_path = mol2vec_dataset_path
+        self.mol2vec_model_path = mol2vec_model_path
+
+        # Dictionaries indexed by partition label
+        self.partitions = {}          # label -> dataframe
+        self.smiles = {}              # label -> list of smiles
+        self.y = {}                   # label -> numpy array
+        self.mol_sentences = {}       # label -> mol2vec sentences
+
+        self.StandardScaler_features = None
         self.StandardScaler_labels = None
-        
-    def split_data(self, partition_labels=['Tr', 'Val', 'Te']):
-        
-        self.train_data, self.val_data, self.test_data = partition_data(self.df,
-                                                                       partition_col=self.partition_col,
-                                                                       partition_labels=partition_labels
-                                                                       )
-        
-    def load_smiles_labels(self, label_normalised=True):
-        
-        self.y_all = self.df[self.target_column_name].values
-        self.y_train = self.train_data[self.target_column_name].values
-        self.y_test = self.test_data[self.target_column_name].values
-        self.y_val = self.val_data[self.target_column_name].values
-        
-        self.StandardScaler_labels = StandardScaler()
-        if label_normalised:
-            self.StandardScaler_labels.fit(self.y_train.reshape(-1, 1))
-        else:
-            self.StandardScaler_labels.mean_ = 0.0
-            self.StandardScaler_labels.scale_ = 1.0
 
-        os.makedirs(self.mol2vec_dataset_path, exist_ok=True)
-        with open(f'{self.mol2vec_dataset_path}/StandardScaler_labels.pkl', 'wb') as fp:
-            pickle.dump(self.StandardScaler_labels, fp)
+    # --------------------------------------------------------
+    # Partition handling
+    # --------------------------------------------------------
 
-        self.smiles_list_all = self.df[self.smiles_column_name].values.tolist()
-        self.smiles_list_train = self.train_data[self.smiles_column_name].values.tolist()
-        self.smiles_list_test = self.test_data[self.smiles_column_name].values.tolist()
-        self.smiles_list_val = self.val_data[self.smiles_column_name].values.tolist()
+    def get_partitions(self, partition_labels=['Tr', 'Val', 'Te']):
+        
+        print(f'Partitioning data..')
+        self.partitions = split_data(self.df,
+                                    partition_col=self.partition_col,
+                                    partition_labels=partition_labels
+                                    )
+
+    # --------------------------------------------------------
+    # SMILES and labels
+    # --------------------------------------------------------
+
+    def load_smiles_labels(self):
+        
+        print(f'Loading labels..')
+        for p, dfp in self.partitions.items():
+            self.smiles[p] = dfp[self.smiles_column_name].values.tolist()
+            self.y[p] = dfp[self.target_column_name].values
+
+    # --------------------------------------------------------
+    # Mol2Vec sentence creation
+    # --------------------------------------------------------
 
     def create_mol_sentence(self, smiles_list):
         
-        mol_sentences = [mol2alt_sentence(mol, 1)
-                 for smiles in smiles_list
-                 if (mol := Chem.MolFromSmiles(smiles)) is not None]
-        # mol_list = [Chem.MolFromSmiles(smiles) for smiles in smiles_list]
-        # mol_list = [mol for mol in mol_list if mol is not None]
-        # mol_sentences = [mol2alt_sentence(mol, 1) for mol in mol_list]
+        print(f'Mol2Vec sentence creation..')
+        all_sentences =  [mol2alt_sentence(mol, 1) for s in smiles_list if (mol := Chem.MolFromSmiles(s)) is not None]
         
-        return mol_sentences
-    
+        return all_sentences
+
     def create_sentences(self):
+        
+        print(f'Mol2Vec sentence creation for all dataset..')
+        for p in self.smiles:
+            self.mol_sentences[p] = self.create_mol_sentence(self.smiles[p])
 
-        self.mol_sentences_train = self.create_mol_sentence(self.smiles_list_train)
-        self.mol_sentences_test = self.create_mol_sentence(self.smiles_list_test)
-        self.mol_sentences_val = self.create_mol_sentence(self.smiles_list_val)
-        
-    def load_mol2vec_model(self,
-                           mol_sentences_train = None,
-                           train_mol2vec = False,
-                           vector_size = 1024,
-                           window = 10,
-                           min_count = 1,
-                           workers = 4
-                           ):
+    # --------------------------------------------------------
+    # Mol2Vec model
+    # --------------------------------------------------------
+
+    def load_mol2vec_model(self, train_partition="Tr",
+                           train_mol2vec=False,
+                           vector_size=1024,
+                           window=10,
+                           min_count=1,
+                           workers=4):
+
         if train_mol2vec:
-            ## Training Model
-            trained_model = word2vec.Word2Vec(vector_size=vector_size,
-                                            window=window,
-                                            min_count=min_count,
-                                            workers=workers
-                                            )
-            trained_model.build_vocab(mol_sentences_train)
-            trained_model.train(mol_sentences_train, total_examples=trained_model.corpus_count, epochs=10)
-            mol2vec_model = trained_model
+            print(f'Training Mol2Vec model..')
+            sentences = self.mol_sentences[train_partition]
+            model = word2vec.Word2Vec(
+                vector_size=vector_size,
+                window=window,
+                min_count=min_count,
+                workers=workers
+            )
+            model.build_vocab(sentences)
+            model.train(sentences, total_examples=model.corpus_count, epochs=10)
         else:
-            # Load Pretrained Model
-            mol2vec_model = word2vec.Word2Vec.load('/home/rkmvu/Codes/CL_int/Mol2Vec_representation/model_300dim.pkl')
-        
-        return mol2vec_model
-    
-    def mol2vec_repr(self, mol2vec_model, mol_sentences, y_true, train_mol2vec=False):
-        
-        if train_mol2vec:
-            X = sentences2vec(mol_sentences, mol2vec_model)
-        else:
-            X = sentences2vec(mol_sentences, mol2vec_model, unseen='UNK')
-            
-        dims_latent = X.shape[1]
-        X = pd.DataFrame(X, columns=[f'dim-{i}' for i in range(dims_latent)])
-        X['labels'] = y_true
-        
+            print(f'Loading Mol2Vec model..')
+            model = word2vec.Word2Vec.load(self.mol2vec_model_path)
+
+        return model
+
+    # --------------------------------------------------------
+    # Mol2Vec representations
+    # --------------------------------------------------------
+
+    def mol2vec_repr(self, model):
+        """
+        Returns dict: partition -> DataFrame(dim-*, labels)
+        """
+        print(f'Calculating representations..')
+        X = {}
+
+        for p, sentences in self.mol_sentences.items():
+            vecs = sentences2vec(sentences, model, unseen="UNK")
+            df = pd.DataFrame(vecs, columns=[f"dim-{i}" for i in range(vecs.shape[1])])
+            df["labels"] = self.y[p]
+            X[p] = df
+
         return X
-    
-    def mol2vec_data(self):
-        
-        '''Output: X_train, X_test, X_val'''
-        
-        mol2vec_model = self.load_mol2vec_model()
-        X_train = self.mol2vec_repr(mol2vec_model=mol2vec_model,
-                                    mol_sentences=self.mol_sentences_train,
-                                    y_true=self.y_train
-                                    )
-        X_test = self.mol2vec_repr(mol2vec_model=mol2vec_model,
-                                    mol_sentences=self.mol_sentences_test,
-                                    y_true=self.y_test
-                                    )
-        X_val = self.mol2vec_repr(mol2vec_model=mol2vec_model,
-                                    mol_sentences=self.mol_sentences_val,
-                                    y_true=self.y_val
-                                    )
 
+    # --------------------------------------------------------
+    # Normalisation utilities
+    # --------------------------------------------------------
+
+    def _fit_scaler(self, X, enabled=True):
         
-        return X_train, X_val, X_test
-    
+        scaler = StandardScaler()
+        if enabled:
+            print(f'Training StandardScaler..')
+            scaler.fit(X)
+        else:
+            print(f'No training of StandardScaler. Setting mean = 0, variance = 1..')
+            scaler.mean_ = np.zeros(X.shape[1])
+            scaler.scale_ = np.ones(X.shape[1])
+        return scaler
+
+    # --------------------------------------------------------
+    # Normalisation (fit on reference split only)
+    # --------------------------------------------------------
+
+    def normalize_data(self, X_dict, train_partition="Tr",
+                       feature_normalised=True,
+                       label_normalised=True):
+
+        X_train = X_dict[train_partition].drop(columns="labels").values
+        y_train = X_dict[train_partition]["labels"].values.reshape(-1, 1)
+
+        print('-'*60)
+        print(f'Normalizing features..')
+        self.StandardScaler_features = self._fit_scaler(X_train, feature_normalised)
+        print('-'*60)
+        print(f'Normalizing labels..')
+        self.StandardScaler_labels = self._fit_scaler(y_train, label_normalised)
+        print('-'*60)
+
+        results = {}
+
+        for p, df in X_dict.items():
+            X = df.drop(columns="labels").values
+            y = df["labels"].values.reshape(-1, 1)
+
+            X = self.StandardScaler_features.transform(X)
+            y = np.ravel(self.StandardScaler_labels.transform(y))
+
+            results[p] = list(zip(X, y))
+
+        os.makedirs(self.mol2vec_dataset_path, exist_ok=True)
+        path = f'{self.mol2vec_dataset_path}/StandardScaler_labels.pkl'
+        with open(path, 'wb') as fp:
+            print(f'Saving StandardScaler for labels in: {path}')
+            pickle.dump(self.StandardScaler_labels, fp)
+            
+        path = f'{self.mol2vec_dataset_path}/StandardScaler_features.pkl'
+        with open(path, 'wb') as fp:
+            print(f'Saving StandardScaler for features in: {path}')
+            pickle.dump(self.StandardScaler_features, fp)
+
+        return results
+
+    # --------------------------------------------------------
+    # Full pipeline
+    # --------------------------------------------------------
+
     def prepare_datasets(self,
-                     partition_labels = ['Tr', 'Val', 'Te']
-                     ):
-        
-        self.split_data(partition_labels = partition_labels)
+                         train_partition="Tr",
+                         partition_labels=None,
+                         feature_normalised=True,
+                         label_normalised=True,
+                         train_mol2vec=False):
+
+        print(f'## Preparing full dataset ##')
+        print('-'*80)
+        self.get_partitions(partition_labels)
         self.load_smiles_labels()
         self.create_sentences()
-        train_data, val_data, test_data = self.mol2vec_data()
-        X_train, y_train = train_data.drop(columns=['labels']), train_data['labels']
-        X_test, y_test = test_data.drop(columns=['labels']), test_data['labels']
-        X_val, y_val = val_data.drop(columns=['labels']), val_data['labels']
-        
-        train_dataset = list(zip(X_train.values, y_train.values))
-        test_dataset = list(zip(X_test.values, y_test.values))
-        val_dataset = list(zip(X_val.values, y_val.values))
-        
-        results = {'train':{'smiles':self.smiles_list_train, 'dataset':train_dataset},
-                   'val':{'smiles':self.smiles_list_val, 'dataset':val_dataset},
-                   'test':{'smiles':self.smiles_list_test, 'dataset':test_dataset},
-                    "scaler": {"labels": self.StandardScaler_labels}
-                   }
+
+        mol2vec_model = self.load_mol2vec_model(train_partition=train_partition,
+                                                train_mol2vec=train_mol2vec
+                                                )
+
+        X_dict = self.mol2vec_repr(mol2vec_model)
+
+        datasets = self.normalize_data(X_dict,
+                                     train_partition=train_partition,
+                                     feature_normalised=feature_normalised,
+                                     label_normalised=label_normalised
+                                     )
+
+        results = {PARTITION_NAMES.get(p, p): {"smiles": self.smiles[p], "dataset": datasets[p]} for p in datasets}
+        results["scaler"] = {"features": self.StandardScaler_features,
+                             "labels": self.StandardScaler_labels
+                             }
+        print('-'*80)
+        print(f'## Done ##')
+        print('-'*80)
+        print('='*80)
         
         return results
 
-class GCNDataset:
-    """
-    A dataset preparation utility for graph-based neural networks (e.g., GCNs).
-
-    This class provides an end-to-end pipeline for:
-    - Filtering molecules based on atom types and size.
-    - Applying column constraints.
-    - Splitting into train/validation/test sets.
-    - Normalizing labels.
-    - Saving/loading datasets from preprocessed files.
-
-    Attributes
-    ----------
-    df : pd.DataFrame
-        Working dataframe containing SMILES strings, labels, and partition information.
-    train_data, val_data, test_data : pd.DataFrame or None
-        Dataframes corresponding to train, validation, and test partitions.
-    StandardScaler_labels : StandardScaler or None
-        Scaler used for label normalization.
-    """
-
-    def __init__(self, df_init,
-                smiles_column_name="smiles",
-                target_column_name="target",
-                partition_col="split",
-                max_num_atoms=100,
-                graph_dataset_path='./datasets/graph_dataset'
-                ):
-        """
-        Initialize the GCNDataset object.
-
-        Parameters
-        ----------
-        df_init : pd.DataFrame
-            Input dataframe containing SMILES, labels, and partition info.
-        """
-        
-        self.df = df_init.copy()
-        self.smiles_column_name =smiles_column_name
-        self.target_column_name =target_column_name
-        self.partition_col =partition_col
-        self.max_num_atoms =max_num_atoms
-        self.graph_dataset_path =graph_dataset_path
-        self.train_data, self.val_data, self.test_data = None, None, None
-        self.StandardScaler_labels = None
-        
-    def __repr__(self):
-        return auto_repr(self)
-        
-
-    def atom_filter(self,
-                    all_atoms={'Br', 'Cl', 'P', 'I', 'F', 'H', 'S', 'N', 'O', 'C', 'B', 'Si', 'Na', 'K'}):
-        """
-        Filter molecules based on allowed atom types and maximum atom count.
-
-        Parameters
-        ----------
-        smiles_column_name : str, default="smiles"
-            Column name containing SMILES strings.
-        max_num_atoms : int or float, default=100
-            Maximum number of atoms allowed in a molecule.
-        all_atoms : set, optional
-            Allowed atom symbols.
-
-        Notes
-        -----
-        Updates the internal dataframe `self.df` by removing invalid molecules.
-        """
-        print(f'Filter molecules based on: {all_atoms}')
-        mask = []
-        for smiles in self.df[self.smiles_column_name]:
-            try:
-                mol = Chem.MolFromSmiles(smiles)
-                if mol is None:
-                    mask.append(False)
-                    continue
-                symbols = {atom.GetSymbol() for atom in mol.GetAtoms()}
-                mask.append(symbols.issubset(all_atoms) and (5<= mol.GetNumAtoms() <= self.max_num_atoms))
-            except Exception:
-                mask.append(False)
-        self.df = self.df[np.array(mask)]
-        print(f'Done')
-        print('-'*80)
-
-    def apply_column_constraints(self, filters: list[tuple]):
-        """
-        Apply filtering rules to dataframe columns.
-
-        Parameters
-        ----------
-        filters : list of tuple
-            Each tuple must be of form (col, operator, value).
-            Supported operators: ==, !=, <, <=, >, >=, "between".
-
-        Returns
-        -------
-        pd.DataFrame
-            Filtered dataframe.
-        """
-        ops = {
-            "==": operator.eq, "!=": operator.ne,
-            "<": operator.lt, "<=": operator.le,
-            ">": operator.gt, ">=": operator.ge,
-            "between": lambda col, bounds: col.between(bounds[0], bounds[1]),
-        }
-        print(f'Applying constraints: {ops}')
-        mask = np.ones(len(self.df), dtype=bool)
-        for col, rel, ref in filters:
-            if rel not in ops:
-                raise ValueError(f"Unsupported operator: {rel}")
-            mask &= ops[rel](self.df[col], ref)
-        self.df = self.df[mask]
-        print(f'Done')
-        print('-'*80)
-        return self.df
-
-    def split_data(self, partition_labels=('Tr', 'Val', 'Te')):
-        """
-        Split dataframe into train/validation/test partitions.
-
-        Parameters
-        ----------
-        partition_col : str
-            Column name defining the partition labels.
-        partition_labels : tuple of str, default=("Tr", "Val", "Te")
-            Partition labels for train, validation, and test splits.
-
-        Notes
-        -----
-        Populates `self.train_data`, `self.val_data`, and `self.test_data`.
-        """
-        print(f'Splitting Dataset into Train, Validation and Test')
-        self.train_data, self.val_data, self.test_data = partition_data(self.df,
-                                                                       partition_col=self.partition_col,
-                                                                       partition_labels=partition_labels
-                                                                       )
-        print(f'Train: {len(self.train_data)}, Val: {len(self.val_data)}, Test: {len(self.test_data)}')
-        print(f'Done')
-        print('-'*80)
-        
-    def mol_details(self, symb_hyb_chirl_file=''):
-        
-        print(f'Creating Mol Deatins file for Hybridization, Chirality, Symbols:')
-        full_path = symb_hyb_chirl_file#f'{self.graph_dataset_path}/{symb_hyb_chirl_file}.json'
-
-        if os.path.isfile(full_path):
-            self.kwargs = load_json(full_path)
-        else:
-            self.kwargs = list_smiles2symbols_hybridization_chiraltype(self.train_data[self.smiles_column_name].tolist())
-            dict2json(self.kwargs, filepath=full_path) 
-        self.kwargs['max_num_atoms'] = self.max_num_atoms
-        print(f'Done')
-        print('-'*80)
-
-    def load_smiles_labels(self,
-                           label_normalised=True):
-        """
-        Extract SMILES strings and labels; normalize labels if required.
-
-        Parameters
-        ----------
-        smiles_column_name : str
-            Column containing SMILES strings.
-        target_column_name : str
-            Column containing target labels.
-        label_normalised : bool, default=True
-            Whether to apply standardization to labels.
-        graph_dataset_path : str, default="./datasets/graph_dataset"
-            Path to save label scaler.
-
-        Notes
-        -----
-        Populates attributes:
-        - `self.y_train`, `self.y_val`, `self.y_test`
-        - `self.smiles_list_train`, `self.smiles_list_val`, `self.smiles_list_test`
-        Saves label scaler as pickle.
-        """
-        print(f'Separating SMILES and Labels from the full dataset')
-        self.y_all   = np.stack(self.df[self.target_column_name].values)
-        self.y_train = np.stack(self.train_data[self.target_column_name].values)
-        self.y_val   = np.stack(self.val_data[self.target_column_name].values)
-        self.y_test  = np.stack(self.test_data[self.target_column_name].values)
-
-        self.StandardScaler_labels = StandardScaler()
-        if label_normalised:
-            self.StandardScaler_labels.fit(ensure_2d(self.y_train))
-        else:
-            n_features = ensure_2d(self.y_train).shape[1]
-            self.StandardScaler_labels.mean_ = np.zeros(n_features)
-            self.StandardScaler_labels.scale_ = np.ones(n_features)
-
-        os.makedirs(self.graph_dataset_path, exist_ok=True)
-        with open(f'{self.graph_dataset_path}/StandardScaler_labels.pkl', 'wb') as fp:
-            pickle.dump(self.StandardScaler_labels, fp)
-
-        # transform and preserve dimensionality
-        self.y_train = self.StandardScaler_labels.transform(ensure_2d(self.y_train))
-        self.y_val   = self.StandardScaler_labels.transform(ensure_2d(self.y_val))
-        self.y_test  = self.StandardScaler_labels.transform(ensure_2d(self.y_test))
-
-        # if single-label, flatten back to (n,)
-        if self.y_train.shape[1] == 1:
-            self.y_train = self.y_train.ravel()
-            self.y_val   = self.y_val.ravel()
-            self.y_test  = self.y_test.ravel()
-
-        self.smiles_list_all   = self.df[self.smiles_column_name].tolist()
-        self.smiles_list_train = self.train_data[self.smiles_column_name].tolist()
-        self.smiles_list_val   = self.val_data[self.smiles_column_name].tolist()
-        self.smiles_list_test  = self.test_data[self.smiles_column_name].tolist()
-        print(f'Train: {len(self.train_data)}, Val: {len(self.val_data)}, Test: {len(self.test_data)}')
-        print(f'Done')
-        print('-'*80)
-        
-    def create_dataset(self, symb_hyb_chirl_file='untitled'):
-        
-        print(f'Creating dataset and saving to .pkl.gz file')
-        self.mol_details(symb_hyb_chirl_file=symb_hyb_chirl_file)
-        print(f'Saving Graph Data in Folder: {self.graph_dataset_path}')
-        self.train_dataset = Multirelational_GraphDataset(smi_list=self.smiles_list_train, labels=self.y_train, **self.kwargs)
-        print(f'Dataset Created')
-        SmilesDataset_graph_gen('train', self.train_dataset, out_path=f'{self.graph_dataset_path}/SmilesDataset_graph', mean_std_flag=True)
-        
-        self.test_dataset  = Multirelational_GraphDataset(smi_list=self.smiles_list_test, labels=self.y_test, **self.kwargs)
-        SmilesDataset_graph_gen('test', self.test_dataset, out_path=f'{self.graph_dataset_path}/SmilesDataset_graph')
-        
-        self.val_dataset   = Multirelational_GraphDataset(smi_list=self.smiles_list_val, labels=self.y_val, **self.kwargs)
-        SmilesDataset_graph_gen('val', self.val_dataset, out_path=f'{self.graph_dataset_path}/SmilesDataset_graph')
-        print(f'Train: {len(self.train_dataset)}, Val: {len(self.val_dataset)}, Test: {len(self.test_dataset)}')
-        print(f'Done')
-        print('-'*80)
-        
-    def load_dataset_from_pkl(self,
-                              features_list=['atom_properties', 'logP_values', 'gasteiger_charge']):
-        """
-        Load preprocessed datasets and label scaler from pickle files.
-
-        Parameters
-        ----------
-        graph_dataset_path : str
-            Path containing dataset pickle files and scaler.
-        features_list : list of str, optional
-            Graph features to include.
-        max_num_atoms : int or float, default=np.inf
-            Maximum number of atoms per molecule.
-
-        Returns
-        -------
-        tuple
-            (train_dataset, val_dataset, test_dataset, StandardScaler_labels)
-        """
-        print(f'Loading dataset from: {self.graph_dataset_path}')
-        kwargs = {'features_list': features_list, 'max_num_atoms': self.max_num_atoms}
-        self.train_dataset = GraphData_from_pickle(f'{self.graph_dataset_path}/SmilesDataset_graph_train.pkl.gz', **kwargs)
-        self.val_dataset   = GraphData_from_pickle(f'{self.graph_dataset_path}/SmilesDataset_graph_val.pkl.gz', **kwargs)
-        self.test_dataset  = GraphData_from_pickle(f'{self.graph_dataset_path}/SmilesDataset_graph_test.pkl.gz', **kwargs)
-
-        with open(f'{self.graph_dataset_path}/StandardScaler_labels.pkl', 'rb') as fp:
-            self.StandardScaler_labels = pickle.load(fp)
-
-        print('Dataset loading complete.\n' + '-'*80)
-        print(f'Train: {len(self.train_dataset)}, Val: {len(self.val_dataset)}, Test: {len(self.test_dataset)}')
-        
-        return self.train_dataset, self.val_dataset, self.test_dataset, self.StandardScaler_labels
-
-    def prepare_datasets(
-            self,
-            all_atoms={'Br', 'Cl', 'P', 'I', 'F', 'H', 'S', 'N', 'O', 'C', 'B', 'Si', 'Na', 'K'},
-            partition_labels=("Tr", "Val", "Te"),
-            label_normalised=True,
-            filters = [],
-            symb_hyb_chirl_file="",
-            features_list=['atom_properties', 'logP_values', 'gasteiger_charge']
-        ):
-        """
-        Prepare datasets end-to-end, either by loading from precomputed pickle
-        or by regenerating them from scratch.
-
-        Parameters
-        ----------
-        partition_labels : tuple of str, default=("Tr", "Val", "Te")
-            Partition labels.
-        max_num_atoms : int, default=100
-            Maximum number of atoms per molecule.
-        all_atoms : set, optional
-            Allowed atom symbols.
-        label_normalised : bool, default=True
-            Whether to normalize labels.
-        symb_hyb_chirl_file : str, default=""
-            File for hybridization/chirality info.
-        features_list : list of str, optional
-            Graph features to include.
-
-        Returns
-        -------
-        dict
-            {
-            'train': {'smiles': [...], 'dataset': train_dataset},
-            'val':   {'smiles': [...], 'dataset': val_dataset},
-            'test':  {'smiles': [...], 'dataset': test_dataset},
-            'scaler': {'labels': StandardScaler_labels}
-            }
-        """
-        print(f'Preparing Dataset:')
-        print('-'*80)
-        def build_results(train_dataset, val_dataset, test_dataset, scaler):
-            return {
-                'train': {'smiles': [train_dataset.get_smiles(i) for i in range(len(train_dataset))],
-                        'dataset': train_dataset},
-                'val':   {'smiles': [val_dataset.get_smiles(i) for i in range(len(val_dataset))],
-                        'dataset': val_dataset},
-                'test':  {'smiles': [test_dataset.get_smiles(i) for i in range(len(test_dataset))],
-                        'dataset': test_dataset},
-                'scaler': {'labels': scaler}
-            }
-
-        try:
-            # self.kwargs = load_json(symb_hyb_chirl_file)
-            # self.kwargs['max_num_atoms'] = self.max_num_atoms
-            datasets = self.load_dataset_from_pkl(features_list=features_list)
-            self.train_dataset, self.val_dataset, self.test_dataset, self.StandardScaler_labels = datasets
-
-        except (FileNotFoundError, EOFError, pickle.UnpicklingError):
-            # Regenerate dataset from scratch
-            self.atom_filter(all_atoms=all_atoms)
-            if filters:
-                self.apply_column_constraints(filters=filters)
-            self.split_data(partition_labels=partition_labels)
-            self.load_smiles_labels(label_normalised=label_normalised)
-            self.create_dataset(symb_hyb_chirl_file=symb_hyb_chirl_file)
-
-            datasets = self.load_dataset_from_pkl(features_list=features_list)
-            self.train_dataset, self.val_dataset, self.test_dataset, self.StandardScaler_labels = datasets
-        print('Dataset Preparation complete')
-        print('-'*80)
-
-        return build_results(self.train_dataset, self.val_dataset,
-                         self.test_dataset, self.StandardScaler_labels)
-
 
 class DescriptorsDataset:
-    
-    def __init__(self, df_init,
-                 smiles_column_name,
-                 target_column_name,
-                 partition_col,
-                 descriptor_dataset_path = './descriptor_dataset_path/'
-                 ):
+
+    def __init__(self, df_init, smiles_column_name, target_column_name,
+                 partition_col, descriptor_dataset_path="./descriptor_dataset_path/"):
+
         os.makedirs(descriptor_dataset_path, exist_ok=True)
+
         self.df = df_init.copy()
         self.smiles_column_name = smiles_column_name
         self.target_column_name = target_column_name
         self.partition_col = partition_col
         self.descriptor_dataset_path = descriptor_dataset_path
-        self.train_data, self.val_data, self.test_data = None, None, None
+
+        self.partitions = {}        # label -> dataframe
+        self.smiles = {}            # label -> smiles list
+        self.y = {}                 # label -> labels
+
+        self.StandardScaler_features = None
         self.StandardScaler_labels = None
-        self.scaler_train_feats = None
         self.optimal_features = None
 
-    def split_data(self, partition_labels=['Tr', 'Val', 'Te']):
-        self.train_data, self.val_data, self.test_data = partition_data(self.df,
-                                                                       partition_col=self.partition_col,
-                                                                       partition_labels=partition_labels
-                                                                       )
-        
-    def load_smiles_labels(self):
-        self.y_all = self.df[self.target_column_name].values
-        self.y_train = self.train_data[self.target_column_name].values
-        self.y_test = self.test_data[self.target_column_name].values
-        self.y_val = self.val_data[self.target_column_name].values
+    # ----------------------------------------------------
+    # Partition handling
+    # ----------------------------------------------------
 
-        self.smiles_list_all = self.df[self.smiles_column_name].values.tolist()
-        self.smiles_list_train = self.train_data[self.smiles_column_name].values.tolist()
-        self.smiles_list_test = self.test_data[self.smiles_column_name].values.tolist()
-        self.smiles_list_val = self.val_data[self.smiles_column_name].values.tolist()
-    
-    # ---------------------------
-    # FEATURE PREPROCESSING
-    # ---------------------------
+    def get_partitions(self, partition_labels=['Tr', 'Val', 'Te']):
+        
+        print(f'Partitioning data:')
+        self.partitions = split_data(self.df,
+                                    partition_col=self.partition_col,
+                                    partition_labels=partition_labels
+                                    )
+
+    # ----------------------------------------------------
+    # Load SMILES and labels
+    # ----------------------------------------------------
+
+    def load_smiles_labels(self):
+        
+        print(f'Loading labels:')
+        for p, dfp in self.partitions.items():
+            self.smiles[p] = dfp[self.smiles_column_name].values.tolist()
+            self.y[p] = dfp[self.target_column_name].values
+
+    # ----------------------------------------------------
+    # Feature selection utilities
+    # ----------------------------------------------------
+
     def _select_by_mutual_info(self, X_train, y_train, threshold):
+        
+        print(f'Selecting features w.r.t Mutual Information:')
         mi_scores = mutual_info_regression(X_train, y_train)
+        
         return X_train.columns[mi_scores > threshold]
 
     def _remove_high_corr(self, X, threshold):
+        
+        print(f'Removing highly correlated columns:')
+        
         return remove_highly_correlated_columns(X, threshold=threshold)
 
     def _remove_low_corr(self, X_train, y_train, target_col, threshold):
         
-        y_train_series = pd.Series(y_train, name=target_col)
-        corr_matrix = pd.concat([X_train, y_train_series], axis=1).corr()
-        corr_target = corr_matrix[target_col].abs().sort_values(ascending=False)
-        keep_features = list(corr_target[(corr_target > threshold) & (corr_target < 1.0)].keys())
+        print(f'Removing non-correlated columns:')
+        y_series = pd.Series(y_train, name=target_col)
+        corr = pd.concat([X_train, y_series], axis=1).corr()
+        corr_target = corr[target_col].abs().sort_values(ascending=False)
+        keep = list(corr_target[(corr_target > threshold) & (corr_target < 1.0)].keys())
         
-        return keep_features
+        return keep
 
     def _apply_hierarchical_fs(self, X_train, y_train, X_val, y_val):
         
-        feature_names =  hierarchical_feature_selection(X_train=X_train, y_train=y_train,
+        print(f'Applying hierarchical feature selection:')
+        optimal_feature =  hierarchical_feature_selection(X_train=X_train, y_train=y_train,
                                                         X_val=X_val, y_val=y_val,
                                                         threshold=0.001, n_estimators=50,
                                                         random_state=42, col_drop_threshold=0.99,
-                                                        criterion='squared_error', max_features='sqrt'
+                                                        criterion="squared_error", max_features="sqrt"
                                                         )
-        return feature_names
+        
+        return optimal_feature
 
-    def preprocess_features(self, X_train, X_val,
-                            y_train, y_val,
-                            optimal_feature_path, drop_columns=[], min_feature_variance = 1e-10,
-                            preprocessing=True, feature_selection=True, fingerprints=False,
-                            mi_threshold=0.05, corr_threshold=0.95, non_corr_threshold=0.05):
-        """
-        Orchestrates feature preprocessing in modular steps.
-        """
+    # ----------------------------------------------------
+    # Feature preprocessing (fit on reference split only)
+    # ----------------------------------------------------
+
+    def preprocess_features(self, train_partition, val_partition,
+                            optimal_feature_path, drop_columns=[],
+                            min_feature_variance=1e-10,
+                            preprocessing=True, feature_selection=True,
+                            fingerprints=False, mi_threshold=0.05,
+                            corr_threshold=0.95, non_corr_threshold=0.05,
+                            force=False):
+
         random.seed(10)
         np.random.seed(20)
 
-        X_train = X_train.drop(columns=drop_columns).select_dtypes(include='number')
-        mask = X_train.std(numeric_only=True) >= min_feature_variance
-        selected_cols = mask[mask].index.tolist()  # keep only True columns
-        X_train = X_train[selected_cols]
-        optimal_features = X_train.columns
-        if preprocessing:
-            if os.path.isfile(optimal_feature_path):
-                with open(optimal_feature_path, 'r') as f:
-                    optimal_features = json.load(f)
-            else:
-                # Mutual info selection
-                selected_features = self._select_by_mutual_info(X_train=X_train, y_train=y_train, threshold=mi_threshold)
-                X_train = X_train[selected_features]
+        print(f'Preprocessing features:')
+        X_train = self.partitions[train_partition].drop(columns=drop_columns).select_dtypes(include="number")
+        y_train = self.y[train_partition]
 
-                # Remove high correlation
+        X_val = self.partitions[val_partition].drop(columns=drop_columns).select_dtypes(include="number")
+        y_val = self.y[val_partition]
+
+        mask = X_train.std(numeric_only=True) >= min_feature_variance
+        X_train = X_train[mask[mask].index]
+        optimal_features = X_train.columns.tolist()
+
+        if preprocessing:
+            if os.path.isfile(optimal_feature_path) and not force:
+                print(f'Loading optimal features from: {optimal_feature_path}')
+                with open(optimal_feature_path, "r") as f:
+                    optimal_features = json.load(f)
+                print(f'Loaded.')
+            else:
+                selected = self._select_by_mutual_info(X_train, y_train, mi_threshold)
+                X_train = X_train[selected]
+
                 X_train = self._remove_high_corr(X_train, corr_threshold)
 
-                # Remove low correlation
-                optimal_features = self._remove_low_corr(X_train=X_train, y_train=y_train,
-                                                         target_col=self.target_column_name, threshold=non_corr_threshold
-                                                         )
+                optimal_features = self._remove_low_corr(
+                                                        X_train=X_train, y_train=y_train,
+                                                        target_col=self.target_column_name,
+                                                        threshold=non_corr_threshold
+                                                    )
 
-                # Optional feature selection
                 if feature_selection:
-                    optimal_features = self._apply_hierarchical_fs(X_train, y_train, X_val, y_val)
+                    optimal_features = self._apply_hierarchical_fs(
+                        X_train[optimal_features], y_train,
+                        X_val[optimal_features], y_val
+                    )
 
-                save_list2json(optimal_features, filepath=optimal_feature_path)
+                save_list2json(optimal_features, optimal_feature_path)
+
             if not fingerprints:
-                optimal_features = [s for s in optimal_features if 'MorganFP_' not in s]
+                optimal_features = [f for f in optimal_features if "MorganFP_" not in f]
 
+        print(f'Number of features:{len(optimal_features)}')
         self.optimal_features = optimal_features
         
         return optimal_features
 
-    # ---------------------------
-    # NORMALIZATION
-    # ---------------------------
+    # ----------------------------------------------------
+    # Scaling
+    # ----------------------------------------------------
+
     def _fit_scaler(self, X, enabled=True):
+        
+        print(f'Training StandardScaler:')
         scaler = StandardScaler()
         if enabled:
             scaler.fit(X)
         else:
-            scaler.mean_ = 0
-            scaler.scale_ = 1
+            scaler.mean_ = np.zeros(X.shape[1])
+            scaler.scale_ = np.ones(X.shape[1])
+            
         return scaler
 
-    def _transform_with_scaler(self, scaler, *datasets):
-        return [scaler.transform(ds) for ds in datasets]
+    # ----------------------------------------------------
+    # Normalize all partitions using training split
+    # ----------------------------------------------------
 
-    def normalize_data(self, X_train, X_val, X_test, y_train, y_val, y_test,
-                       feature_normalised=True, label_normalised=True):
-        """
-        Normalize features and labels separately using StandardScaler.
-        """
-        # Feature scaling
+    def normalize_data(self, train_partition, feature_normalised=True, label_normalised=True):
+
+        print(f'Normalizing data:')
+        X_train = self.partitions[train_partition][self.optimal_features].values
+        y_train = self.y[train_partition].reshape(-1, 1)
+
         self.StandardScaler_features = self._fit_scaler(X_train, feature_normalised)
-        X_train, X_val, X_test = self._transform_with_scaler(self.StandardScaler_features, X_train, X_val, X_test)
+        self.StandardScaler_labels = self._fit_scaler(y_train, label_normalised)
 
-        # Label scaling
-        self.StandardScaler_labels = self._fit_scaler(y_train.reshape(-1, 1), label_normalised)
-        y_train, y_val, y_test = [np.ravel(self.StandardScaler_labels.transform(arr.reshape(-1, 1)))
-                                        for arr in (y_train, y_val, y_test)
-                                    ]
+        results = {}
+
+        for p, df in self.partitions.items():
+            X = df[self.optimal_features].values
+            y = self.y[p].reshape(-1, 1)
+
+            X = self.StandardScaler_features.transform(X)
+            y = np.ravel(self.StandardScaler_labels.transform(y))
+
+            results[p] = list(zip(X, y))
 
         with open(f'{self.descriptor_dataset_path}/StandardScaler_labels.pkl', 'wb') as fp:
             pickle.dump(self.StandardScaler_labels, fp)
         with open(f'{self.descriptor_dataset_path}/StandardScaler_features.pkl', 'wb') as fp:
             pickle.dump(self.StandardScaler_features, fp)
-        
-        return X_train, X_val, X_test, y_train, y_val, y_test
-    
+
+        return results
+
+    # ----------------------------------------------------
+    # Full pipeline
+    # ----------------------------------------------------
+
     def prepare_datasets(self, optimal_feature_path,
+                         train_partition="Tr",
+                         val_partition="Val",
+                         partition_labels=None,
                          drop_columns=[],
                          preprocessing=True,
                          feature_selection=True,
                          fingerprints=False,
                          feature_normalised=True,
                          label_normalised=True,
+                         force=False,
                          mi_threshold=0.05,
                          corr_threshold=0.95,
-                         non_corr_threshold=0.05,
-                         partition_labels=['Tr', 'Val', 'Te']
-                         ):
-        
-        self.split_data(partition_labels = partition_labels)
+                         non_corr_threshold=0.05):
+
+        self.get_partitions(partition_labels)
         self.load_smiles_labels()
-        self.preprocess_features(X_train=self.train_data, X_val=self.val_data,
-                                y_train=self.y_train, y_val=self.y_val,
-                                drop_columns=drop_columns,
+
+        self.preprocess_features(
+                                train_partition=train_partition,
+                                val_partition=val_partition,
                                 optimal_feature_path=optimal_feature_path,
+                                drop_columns=drop_columns,
                                 preprocessing=preprocessing,
                                 feature_selection=feature_selection,
                                 fingerprints=fingerprints,
                                 mi_threshold=mi_threshold,
                                 corr_threshold=corr_threshold,
-                                non_corr_threshold=non_corr_threshold
+                                non_corr_threshold=non_corr_threshold,
+                                force=force
+                            )
+
+        datasets = self.normalize_data(
+                                    train_partition=train_partition,
+                                    feature_normalised=feature_normalised,
+                                    label_normalised=label_normalised
                                 )
-        self.X_train, self.X_val, self.X_test = (self.train_data[self.optimal_features],
-                                                        self.val_data[self.optimal_features],
-                                                        self.test_data[self.optimal_features]
-                                                        )
-        X_train, X_val, X_test, y_train, y_val, y_test= self.normalize_data(self.X_train, self.X_val, self.X_test,
-                                                                            self.y_train, self.y_val, self.y_test,
-                                                                            feature_normalised=feature_normalised,
-                                                                            label_normalised=label_normalised
-                                                                            )
-        train_dataset = list(zip(X_train, y_train))
-        test_dataset = list(zip(X_test, y_test))
-        val_dataset = list(zip(X_val, y_val))
-        
-        results = {'train':{'smiles':self.smiles_list_train, 'dataset':train_dataset},
-                   'val':{'smiles':self.smiles_list_val, 'dataset':val_dataset},
-                   'test':{'smiles':self.smiles_list_test, 'dataset':test_dataset},
-                    "scaler": {
-                            "features": self.StandardScaler_features,
-                            "labels": self.StandardScaler_labels
-                            }
-                   }
+
+        results = {PARTITION_NAMES.get(p, p): {"smiles": self.smiles[p], "dataset": datasets[p]} for p in datasets}
+
+        results["scaler"] = {"features": self.StandardScaler_features,
+                             "labels": self.StandardScaler_labels
+                             }
+
         return results
     
-class ChemBertDataset:
     
+class ChemBertDataset:
+
     def __init__(self, df_init,
-                 smiles_column_name='smiles',
-                 target_column_name = 'labels',
-                 partition_col = 'Data_Split',
-                 model_name = "DeepChem/ChemBERTa-77M-MLM"):
+                 smiles_column_name="smiles",
+                 target_column_name="labels",
+                 partition_col="Data_Split",
+                 model_name="DeepChem/ChemBERTa-77M-MLM",
+                 metadata_path="./"):
+
         self.df = df_init.copy()
         self.smiles_column_name = smiles_column_name
         self.target_column_name = target_column_name
         self.partition_col = partition_col
+        self.metadata_path = metadata_path
+
         self.TOKENIZER = AutoTokenizer.from_pretrained(model_name)
-        self.train_data, self.val_data, self.test_data = None, None, None
+
+        self.partitions = {}        # label -> dataframe
+        self.smiles = {}            # label -> smiles
+        self.y = {}                 # label -> labels
+
         self.StandardScaler_labels = None
-        
-    def split_data(self, partition_labels=['Tr', 'Val', 'Te']):
-        
-        self.train_data, self.val_data, self.test_data = partition_data(self.df,
-                                                                       partition_col=self.partition_col,
-                                                                       partition_labels=partition_labels
-                                                                       )
-        
-    def load_smiles_labels(self, label_normalised=True, chembert_dataset_path='./'):
+        self.max_length = None
 
-        self.y_all = self.df[self.target_column_name].values
-        self.y_train = self.train_data[self.target_column_name].values
-        self.y_test = self.test_data[self.target_column_name].values
-        self.y_val = self.val_data[self.target_column_name].values
+    # ---------------------------------------------------
+    # Partition handling
+    # ---------------------------------------------------
 
-        # Single scaler
+    def get_partitions(self, partition_labels=['Tr', 'Val', 'Te']):
+        
+        print(f'Partitioning data..')
+        self.partitions = split_data(self.df,
+                                    partition_col=self.partition_col,
+                                    partition_labels=partition_labels
+                                    )
+
+    # ---------------------------------------------------
+    # Load smiles & labels
+    # ---------------------------------------------------
+
+    def load_smiles_labels(self, train_partition="Tr", label_normalised=True):
+
+        print(f'Loading SMILES and Labels..')
+        for p, dfp in self.partitions.items():
+            self.smiles[p] = dfp[self.smiles_column_name].tolist()
+            self.y[p] = dfp[self.target_column_name].values
+
+        # Fit label scaler only on reference partition
         self.StandardScaler_labels = StandardScaler()
         if label_normalised:
-            self.StandardScaler_labels.fit(self.y_train.reshape(-1, 1))
+            self.StandardScaler_labels.fit(self.y[train_partition].reshape(-1, 1))
         else:
             self.StandardScaler_labels.mean_ = 0.0
             self.StandardScaler_labels.scale_ = 1.0
 
-        # Save scaler
-        os.makedirs(chembert_dataset_path, exist_ok=True)
-        with open(f'{chembert_dataset_path}/StandardScaler_labels.pkl', 'wb') as fp:
+        for p in self.y:
+            self.y[p] = np.ravel(self.StandardScaler_labels.transform(self.y[p].reshape(-1, 1)))
+
+        os.makedirs(self.metadata_path, exist_ok=True)
+        with open(f"{self.metadata_path}/StandardScaler_labels.pkl", "wb") as fp:
             pickle.dump(self.StandardScaler_labels, fp)
 
-        # Apply transformation
-        self.y_all = np.ravel(self.StandardScaler_labels.transform(self.y_all.reshape(-1, 1)))
-        self.y_train = np.ravel(self.StandardScaler_labels.transform(self.y_train.reshape(-1, 1)))
-        self.y_val = np.ravel(self.StandardScaler_labels.transform(self.y_val.reshape(-1, 1)))
-        self.y_test = np.ravel(self.StandardScaler_labels.transform(self.y_test.reshape(-1, 1)))
+    # ---------------------------------------------------
+    # Find max token length (reference split only)
+    # ---------------------------------------------------
 
-        self.smiles_list_all = self.df[self.smiles_column_name].tolist()
-        self.smiles_list_train = self.train_data[self.smiles_column_name].tolist()
-        self.smiles_list_test = self.test_data[self.smiles_column_name].tolist()
-        self.smiles_list_val = self.val_data[self.smiles_column_name].tolist()   
-    
-    def find_max_length(self,
-                        max_len_path = './max_length_smiles.pkl'
-                        ):
-        
+    def find_max_length(self, train_partition="Tr", max_len_path="./max_length_smiles.pkl"):
+
         if os.path.isfile(max_len_path):
-            with open(max_len_path, 'rb') as fp:
-                max_length = pickle.load(fp)
+            print(f'Loading max smiles length from: {max_len_path}')
+            with open(max_len_path, "rb") as fp:
+                self.max_length = pickle.load(fp)
         else:
-            all_tokens = self.TOKENIZER(self.smiles_list_train)
-            input_ids = all_tokens['input_ids']
-            max_length = len(max(input_ids, key=len))
-            with open(max_len_path, 'wb') as fp:
-                pickle.dump(max_length, fp)
+            print(f'Finding max smiles length..')
+            tokens = self.TOKENIZER(self.smiles[train_partition])
+            input_ids = tokens["input_ids"]
+            self.max_length = max(len(x) for x in input_ids)
+
+            with open(max_len_path, "wb") as fp:
+                pickle.dump(self.max_length, fp)
+            print(f'Saved max smiles length to: {max_len_path}')
+
+        self.tokenize = lambda batch: self.TOKENIZER(batch[self.smiles_column_name],
+                                                    padding="max_length",
+                                                    truncation=True,
+                                                    max_length=self.max_length
+                                                    )
+
+    # ---------------------------------------------------
+    # Create HuggingFace datasets for all partitions
+    # ---------------------------------------------------
+
+    def create_datasets(self, data_augmentation=False, train_partition="Tr"):
+
+        print(f'Creating HuggingFace datasets for all partitions:')
+        hf_datasets = {}
+        for p in self.partitions:
+            smiles = self.smiles[p]
+            labels = self.y[p]
+
+            if data_augmentation and p == train_partition:
+                smiles, labels = augment_smiles_with_labels(smiles_list=smiles, labels=labels)
+                smiles, labels = shuffle(smiles, labels, random_state=42)
+
+            ds = Dataset.from_pandas(pd.DataFrame({self.smiles_column_name: smiles, "labels": labels}))
+            ds = ds.map(self.tokenize, batched=True)
+            ds.set_format("torch", columns=["input_ids", "attention_mask", "labels"])
+
+            hf_datasets[PARTITION_NAMES.get(p, p)] = {"smiles": smiles, "dataset": ds}
+
+        hf_datasets["scaler"] = {"labels": self.StandardScaler_labels}
+        
+        return hf_datasets
+
+    # ---------------------------------------------------
+    # Full pipeline
+    # ---------------------------------------------------
+
+    def prepare_datasets(self,
+                         train_partition="Tr",
+                         partition_labels=None,
+                         label_normalised=True,
+                         max_len_path="./max_length_smiles.pkl",
+                         data_augmentation=False):
+
         print('-'*80)
-        print(f'Max Length SMILES: {max_length}')
-        print('+'*80)
-        self.tokenize = lambda batch: self.TOKENIZER(batch[self.smiles_column_name], padding="max_length", truncation=True, max_length=max_length)
-        
-    def create_dataset(self, data_augmentation=False):
-        
-        all_dataset = Dataset.from_pandas(pd.DataFrame({self.smiles_column_name: self.smiles_list_all, "labels":self.y_all}))
-        train_dataset = Dataset.from_pandas(pd.DataFrame({self.smiles_column_name: self.smiles_list_train, "labels":self.y_train}))
-        test_dataset = Dataset.from_pandas(pd.DataFrame({self.smiles_column_name: self.smiles_list_test, "labels":self.y_test}))
-        val_dataset = Dataset.from_pandas(pd.DataFrame({self.smiles_column_name: self.smiles_list_val, "labels":self.y_val}))
+        print(f'## Preparing the full dataset ##')
+        print('-'*80)
+        self.get_partitions(partition_labels)
+        self.load_smiles_labels(train_partition=train_partition, label_normalised=label_normalised)
+        self.find_max_length(train_partition=train_partition, max_len_path=max_len_path)
 
-        if data_augmentation:
-            augmented_smiles, augmented_labels = augment_smiles_with_labels(smiles_list=self.smiles_list_train, labels=self.y_train)
-            aug_smiles, y_train = shuffle(augmented_smiles, augmented_labels, random_state=42)
-            train_dataset = Dataset.from_pandas(pd.DataFrame({self.smiles_column_name: aug_smiles, "labels":y_train}))
+        datasets = self.create_datasets(data_augmentation=data_augmentation,
+                                        train_partition=train_partition
+                                        )
+        print('-'*80)
+        print('## Done ##')
+        print('-'*80)
 
-        all_dataset = all_dataset.map(self.tokenize, batched=True)
-        train_dataset = train_dataset.map(self.tokenize, batched=True)
-        val_dataset = val_dataset.map(self.tokenize, batched=True)
-        test_dataset = test_dataset.map(self.tokenize, batched=True)
+        return datasets
+
+
+class GCNDataset:
+
+    def __init__(self, df_init,
+                 smiles_column_name="smiles",
+                 target_column_name="target",
+                 partition_col="split",
+                 max_num_atoms=100,
+                 graph_dataset_path="./datasets/graph_dataset"):
+
+        self.df = df_init.copy()
+        self.smiles_column_name = smiles_column_name
+        self.target_column_name = target_column_name
+        self.partition_col = partition_col
+        self.max_num_atoms = max_num_atoms
+        self.graph_dataset_path = graph_dataset_path
+
+        self.partitions = {}       # label -> dataframe
+        self.smiles = {}           # label -> smiles
+        self.y = {}                # label -> labels
+
+        self.StandardScaler_labels = None
+        self.kwargs = None
+
+    # ----------------------------------------------------
+    # Partition handling
+    # ----------------------------------------------------
+
+    def get_partitions(self, partition_labels=['Tr', 'Val', 'Te']):
         
-        results = {
-                    "train": {"smiles": self.smiles_list_train, "dataset": train_dataset},
-                    "val": {"smiles": self.smiles_list_val, "dataset": val_dataset},
-                    "test": {"smiles": self.smiles_list_test, "dataset": test_dataset},
-                    "scaler": {"labels": self.StandardScaler_labels}
-                }
+        self.partitions = split_data(self.df,
+                                    partition_col=self.partition_col,
+                                    partition_labels=partition_labels
+                                    )
 
+    # ----------------------------------------------------
+    # Atom & column filtering
+    # ----------------------------------------------------
+
+    def atom_filter(self, all_atoms={'Br','Cl','P','I','F','H','S','N','O','C','B','Si','Na','K'}):
+        mask = []
+        for smi in self.df[self.smiles_column_name]:
+            try:
+                mol = Chem.MolFromSmiles(smi)
+                if mol is None:
+                    mask.append(False); continue
+                symbols = {a.GetSymbol() for a in mol.GetAtoms()}
+                mask.append(symbols.issubset(all_atoms) and (5 <= mol.GetNumAtoms() <= self.max_num_atoms))
+            except:
+                mask.append(False)
+        self.df = self.df[np.array(mask)]
+
+    def apply_column_constraints(self, filters):
+        ops = {
+            "==": operator.eq, "!=": operator.ne,
+            "<": operator.lt, "<=": operator.le,
+            ">": operator.gt, ">=": operator.ge,
+            "between": lambda col, b: col.between(b[0], b[1])
+        }
+        mask = np.ones(len(self.df), dtype=bool)
+        for col, rel, ref in filters:
+            mask &= ops[rel](self.df[col], ref)
+        self.df = self.df[mask]
+
+    # ----------------------------------------------------
+    # SMILES and label handling
+    # ----------------------------------------------------
+
+    def load_smiles_labels(self, train_partition="Tr", label_normalised=True):
+
+        for p, dfp in self.partitions.items():
+            self.smiles[p] = dfp[self.smiles_column_name].tolist()
+            self.y[p] = np.stack(dfp[self.target_column_name].values)
+
+        # Fit label scaler only on reference partition
+        self.StandardScaler_labels = StandardScaler()
+        y_train = ensure_2d(self.y[train_partition])
+
+        if label_normalised:
+            self.StandardScaler_labels.fit(y_train)
+        else:
+            self.StandardScaler_labels.mean_ = np.zeros(y_train.shape[1])
+            self.StandardScaler_labels.scale_ = np.ones(y_train.shape[1])
+
+        os.makedirs(self.graph_dataset_path, exist_ok=True)
+        with open(f"{self.graph_dataset_path}/StandardScaler_labels.pkl", "wb") as fp:
+            pickle.dump(self.StandardScaler_labels, fp)
+
+        for p in self.y:
+            Y = self.StandardScaler_labels.transform(ensure_2d(self.y[p]))
+            self.y[p] = Y.ravel() if Y.shape[1] == 1 else Y
+
+    # ----------------------------------------------------
+    # Atom metadata (fit on training split only)
+    # ----------------------------------------------------
+
+    def mol_details(self, train_partition, symb_hyb_chirl_file):
+
+        if os.path.isfile(symb_hyb_chirl_file):
+            self.kwargs = load_json(symb_hyb_chirl_file)
+        else:
+            self.kwargs = list_smiles2symbols_hybridization_chiraltype(self.smiles[train_partition])
+            dict2json(self.kwargs, filepath=symb_hyb_chirl_file)
+
+        self.kwargs["max_num_atoms"] = self.max_num_atoms
+
+    # ----------------------------------------------------
+    # Dataset creation
+    # ----------------------------------------------------
+
+    def create_datasets(self, train_partition, symb_hyb_chirl_file):
+
+        self.mol_details(train_partition, symb_hyb_chirl_file)
+
+        os.makedirs(self.graph_dataset_path, exist_ok=True)
+        out_path = f"{self.graph_dataset_path}/SmilesDataset_graph"
+
+        for p in self.partitions:
+            ds = Multirelational_GraphDataset(smi_list=self.smiles[p], labels=self.y[p], **self.kwargs)
+            SmilesDataset_graph_gen(p.lower(), ds, out_path=out_path, mean_std_flag=(p == train_partition))
+
+    # ----------------------------------------------------
+    # Load from pickle
+    # ----------------------------------------------------
+
+    def load_dataset_from_pkl(self, features_list):
+        
+        kwargs = {"features_list": features_list, "max_num_atoms": self.max_num_atoms}
+        datasets = {}
+
+        for p in self.partitions:
+            datasets[p] = GraphData_from_pickle(f"{self.graph_dataset_path}/SmilesDataset_graph_{p.lower()}.pkl.gz", **kwargs)
+
+        with open(f"{self.graph_dataset_path}/StandardScaler_labels.pkl", "rb") as fp:
+            self.StandardScaler_labels = pickle.load(fp)
+        
+        return datasets
+
+    # ----------------------------------------------------
+    # Full pipeline
+    # ----------------------------------------------------
+
+    def prepare_datasets(self,
+                         train_partition="Tr",
+                         partition_labels=None,
+                         all_atoms={'Br','Cl','P','I','F','H','S','N','O','C','B','Si','Na','K'},
+                         filters=[],
+                         symb_hyb_chirl_file="",
+                         features_list=['atom_properties','logP_values','gasteiger_charge'],
+                         label_normalised=True):
+
+        # filtering
+        self.atom_filter(all_atoms)
+        if filters:
+            self.apply_column_constraints(filters)
+
+        # partition
+        self.get_partitions(partition_labels)
+
+        # labels
+        self.load_smiles_labels(train_partition=train_partition,
+                                label_normalised=label_normalised)
+
+        # build or load
+        try:
+            datasets = self.load_dataset_from_pkl(features_list)
+        except:
+            self.create_datasets(train_partition, symb_hyb_chirl_file)
+            datasets = self.load_dataset_from_pkl(features_list)
+
+        results = {PARTITION_NAMES.get(p, p): {"smiles": [datasets[p].get_smiles(i) for i in range(len(datasets[p]))],
+                       "dataset": datasets[p]
+                       } for p in datasets
+                   }
+
+        results["scaler"] = {"labels": self.StandardScaler_labels}
+        
         return results
-    
-    def prepare_datasets(self, partition_labels=['Tr', 'Val', 'Te'],
-                        max_len_path = './max_length_smiles.pkl'
-                        ):
-        
-        self.split_data(partition_labels = partition_labels)
-        self.load_smiles_labels()
-        self.find_max_length(max_len_path=max_len_path)
-        datasets_final = self.create_dataset()
-        
-        return datasets_final
-    
-        
+

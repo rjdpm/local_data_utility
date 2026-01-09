@@ -3,6 +3,7 @@ import os
 import ast
 import sys
 import csv
+import umap
 import gzip
 import pytz
 import shap
@@ -26,11 +27,13 @@ from pympler import asizeof
 import matplotlib
 # matplotlib.use('TkAgg')
 from umap.umap_ import UMAP
+from sklearn.cluster import DBSCAN
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from datetime import datetime
 from contextlib import contextmanager
 from ordered_set import OrderedSet
+from sklearn.preprocessing import StandardScaler
 from collections import OrderedDict
 from typing import Any, List, Tuple, Union, Callable, Optional, Dict
 
@@ -39,11 +42,13 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import label_binarize
 from sklearn.manifold import MDS, TSNE, Isomap
 from sklearn.decomposition import PCA, KernelPCA, FactorAnalysis, TruncatedSVD
+from sklearn.svm import SVC, SVR
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis as LDA
 from sklearn.metrics import root_mean_squared_error, mean_absolute_error, r2_score
 from sklearn.metrics import (accuracy_score, confusion_matrix,
                              ConfusionMatrixDisplay, classification_report,
-                             roc_curve, auc, precision_recall_curve
+                             roc_curve, auc, precision_recall_curve,
+                             pairwise_distances
                              )
 
 
@@ -55,8 +60,21 @@ from torch_geometric.data import DataLoader as PyGDataLoader
 # sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../')))
 # sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+# Disable all logs from the 'rdApp' logger (the main source of RDKit messages)
+from rdkit import RDLogger
+RDLogger.DisableLog('rdApp.*') 
+# Disable all logs from mordred library
+import logging
+logging.getLogger('mordred').setLevel(logging.CRITICAL)
+
+
+plt.rcParams['font.weight'] = 'bold'
+plt.rcParams['axes.labelweight'] = 'bold'
+plt.rcParams['font.style'] = 'italic'
+
 __all__ = [
     'show_img',
+    'print_results',
     'list_diff',
     'save_images',
     'matrix2onehot_encode',
@@ -66,6 +84,7 @@ __all__ = [
     'execution_time',
     
     'parse_any',
+    'check_tensor',
     'Normalize',
     'fix_seed',
     'auto_repr',
@@ -121,9 +140,12 @@ __all__ = [
     
     'PCA_fit_transform',
     'KMeans_fit_predict',
+    'DBScan_fit_predict',
+    
+    'get_colors',
     'apply_reductions',
     'plot_reductions',
-    
+    'plot_projection_grid_seaborn',
     'plot_3d',
     'plot_2d',
     'customised_plot',
@@ -163,7 +185,11 @@ __all__ = [
     'hierarchical_feature_selection',
     'data_stat',
     'find_outliers_iqr',
+    'get_outliers',
     
+    'parity_plot_with_folds_and_percent',
+    'parity_plot_with_folds',
+    'bland_altman_plot',
     'plot_distribution_compair',
     'plot_multiple_distribution',
     'plot_multiple_hist',
@@ -175,11 +201,13 @@ __all__ = [
     'geometric_mean_fold_error',
     'min_max',
     'regression_test_metrics',
+    'test_rf',
     'subset_loader',
     'count_linear_layers',
     
     'ClassificationResultAnalyzer',
     'TrendAnalyser',
+    'Any', 'List', 'Tuple', 'Union', 'Callable', 'Optional', 'Dict',
 ]
     
     
@@ -188,6 +216,44 @@ def show_img(img):
     [display(x) for x in img]
 
     return None
+
+def print_results(train_results, test_results, val_results):
+    
+    print('='*70)
+    print(f"{'& Data':7} & {'R2':7} & {'RMSE':7} & {'MAE':7} & {'PCC':7} & {'GMFE':7} & {'Fold-2':7} & {'Fold-3':7} & {'Fold-5':7}")
+    print('-'*70)
+    for k, results in {'& Train': train_results, '& Test': test_results, '& Val': val_results}.items():
+        print(f"{k:7} & "
+            f"{str(results['r2']):7} & "
+            f"{str(results['rmse']):7} & "
+            f"{str(results['mae']):7} & "
+            f"{str(results['PCC']):7} & "
+            f"{str(results['GMFE']):7} & "
+            f"{str(results['fold2']):7} & "
+            f"{str(results['fold3']):7} & "
+            # f"{str(results['fold5']):7} {r"\\"}")
+            f"{str(results['fold5']):7} \\\\")
+    print('='*70)
+    
+    
+def print_results_all(results_dict):
+    
+    print('='*70)
+    print(f"{'& Data':7} & {'R2':7} & {'RMSE':7} & {'MAE':7} & {'PCC':7} & {'GMFE':7} & {'Fold-2':7} & {'Fold-3':7} & {'Fold-5':7}")
+    print('-'*70)
+    for k, results in results_dict.items():
+        print(f"& {k:7} & "
+            f"{str(results['r2']):7} & "
+            f"{str(results['rmse']):7} & "
+            f"{str(results['mae']):7} & "
+            f"{str(results['PCC']):7} & "
+            f"{str(results['GMFE']):7} & "
+            f"{str(results['fold2']):7} & "
+            f"{str(results['fold3']):7} & "
+            # f"{str(results['fold5']):7} {r"\\"}")
+            f"{str(results['fold5']):7} \\\\")
+    print('='*70)
+
 
 
 def list_diff(list1, list2):
@@ -278,6 +344,32 @@ def parse_any(value):
             return float(value)
         except ValueError:
             return str(value)
+
+def check_tensor(t, name, max_print=10):
+    nan_idx = torch.isnan(t).nonzero(as_tuple=False)
+    inf_idx = torch.isinf(t).nonzero(as_tuple=False)
+
+    if nan_idx.numel() > 0:
+        print(f"[NaN] detected in {name} "
+            f"(count={nan_idx.shape[0]})")
+        print(" NaN coordinates (first few):")
+        for idx in nan_idx[:max_print]:
+            print("  ", idx.tolist())
+
+    if inf_idx.numel() > 0:
+        print(f"[Inf] detected in {name} "
+            f"(count={inf_idx.shape[0]})")
+        print(" Inf coordinates (first few):")
+        for idx in inf_idx[:max_print]:
+            print("  ", idx.tolist())
+
+    try:
+        min_val = t.min().item()
+        max_val = t.max().item()
+        print(f"{name}: min={min_val:.3e}, max={max_val:.3e}")
+    except RuntimeError:
+        # min/max fail if tensor is all-NaN
+        print(f"{name}: min/max undefined (all NaN?)")
         
 # Function to Normalize an array :-
 def Normalize(array):
@@ -518,18 +610,65 @@ def dict2json(dict_, filepath='./'):
     json_str = json.dumps(dict_, indent=4)
     with open(filepath, "w") as f:
         f.write(json_str)
-
-def savedict2json(data: dict, path: str):
-    """Save a dictionary to a readable JSON file, converting sets to lists."""
+    print(f'JSON file saved in: {filepath}')
+    
+def savedict2json(data: dict, path: str, to_sort: bool = False):
+    """Save a dictionary to a readable JSON file, converting NumPy, Torch, sets, tuples, etc."""
+    
     def convert(obj):
+        # numpy array
+        if isinstance(obj, np.ndarray):
+            return sorted(obj.tolist()) if to_sort else obj.tolist()
+
+        # numpy scalar
+        if isinstance(obj, np.generic):
+            return obj.item()
+
+        # torch tensor
+        if isinstance(obj, torch.Tensor):
+            arr = obj.detach().cpu().numpy()
+            return sorted(arr.tolist()) if to_sort else arr.tolist()
+
+        # set → list
         if isinstance(obj, set):
-            return sorted(list(obj))#, key=len, reverse=True)
+            lst = list(obj)
+            return sorted(lst) if to_sort else lst
+
+        # tuple → list
+        if isinstance(obj, tuple):
+            return [convert(x) for x in obj]
+
+        # list → recursively convert elements
+        if isinstance(obj, list):
+            return [convert(x) for x in obj]
+
+        # dict → recursively convert values
+        if isinstance(obj, dict):
+            return {k: convert(v) for k, v in obj.items()}
+
         return obj
 
-    serializable_data = {k: convert(v) for k, v in data.items()}
+    serializable_data = convert(data)
 
     with open(path, 'w') as f:
         json.dump(serializable_data, f, indent=4)
+        
+# def savedict2json(data: dict, path: str, to_sort:bool=False):
+    # """Save a dictionary to a readable JSON file, converting sets to lists."""
+#     def convert(obj):
+#         if isinstance(obj, (set, np.ndarray)):
+#             return sorted(list(obj)) if to_sort else list(obj)
+#         if isinstance(obj, torch.Tensor):
+#             return sorted(list(obj.numpy())) if to_sort else list(obj.numpy())
+#         if isinstance(obj, dict):
+#             return {k: convert(v) for k, v in obj.items()}
+        
+#         return obj
+
+#     serializable_data = {k: convert(v) for k, v in data.items()}
+
+#     with open(path, 'w') as f:
+#         json.dump(serializable_data, f, indent=4)
 
 # Function to change a dictionary object to a csv file :-
 def dict_to_csv(dictionary: dict, header: list, filepath: str, filename: str):
@@ -778,7 +917,7 @@ def data_partition_random_indices(num_data_points, train_ratio=0.5, val_ratio=0.
     return idx_train, idx_val, idx_test
 
 
-def data_split_random_df(df, ratios=(0.7, 0.2, 0.1), labels=None, seed=None, split_column = 'Data_Split'):
+def data_split_random_df(df, ratios=(0.7, 0.2, 0.1), labels=None, seed=40, split_column = 'Data_Split', index=1):
     """
     Randomly split a DataFrame into n partitions based on given ratios.
     
@@ -819,7 +958,7 @@ def data_split_random_df(df, ratios=(0.7, 0.2, 0.1), labels=None, seed=None, spl
     
     # Assign partitions
     df = df.copy()
-    df[split_column] = None
+    df.insert(index, split_column, 'NaN')
     start = 0
     for size, label in zip(sizes, labels):
         end = start + size
@@ -1225,9 +1364,60 @@ def KMeans_fit_predict(matrix, n_clusters=5):
     labels = KMeans.fit_predict(matrix)
     for i in range(n_clusters):
         clusters_dict[i] = matrix[labels == i]
+        
+    return clusters_dict, labels, KMeans
 
-    return clusters_dict, labels
 
+def DBScan_fit_predict(matrix, eps=10, min_samples=5):
+    """
+    DBSCAN clustering with post-hoc medoid computation.
+
+    Returns
+    -------
+    clusters_dict : dict
+        cluster_label -> points (noise included as label -1)
+    labels : np.ndarray
+        DBSCAN labels
+    cluster_medoids : dict
+        cluster_label -> medoid (noise excluded)
+    DBSCAN:
+        dbscan object
+    """
+
+    dbscan = DBSCAN(eps=eps, min_samples=min_samples)
+    labels = dbscan.fit_predict(matrix)
+
+    # Store clusters
+    clusters_dict = {}
+    cluster_medoids = {}
+    
+    for lab in np.unique(labels):
+        points = matrix[labels == lab]
+        clusters_dict[lab] = points
+
+        D = pairwise_distances(points)
+        medoid_idx = np.argmin(D.sum(axis=1))
+        cluster_medoids[lab] = points[medoid_idx]
+
+    return clusters_dict, labels, cluster_medoids, dbscan
+
+def get_colors(colours = ['red', 'blue', 'green', 'violet', 'pink', 'orange', 'gray', 'yellow']):
+    
+    # Define default color list (excluding hard-to-see ones)
+    base_colors = colours
+    base_colors += list(mcolors.TABLEAU_COLORS)
+    base_colors += list(mcolors.XKCD_COLORS)
+    base_colors += list(mcolors.CSS4_COLORS)
+    excluded = {'white', 'snow', 'ghostwhite', 'ivory'}
+    base_colors = list(OrderedDict.fromkeys([c for c in base_colors if c not in excluded]))
+
+    # Setup color iterator
+    if isinstance(colours, list):
+        color_iter = iter(colours + base_colors)
+    else:
+        color_iter = iter(['black'] * 100)
+        
+    return color_iter
 
 def apply_reductions(df: pd.DataFrame, value_col: str, use_lda: bool = False) -> Dict[str, np.ndarray]:
     """
@@ -1242,6 +1432,7 @@ def apply_reductions(df: pd.DataFrame, value_col: str, use_lda: bool = False) ->
         Dict[str, np.ndarray]: Dictionary with method names as keys and 2D projections as values.
         np.ndarray: Values of the coloring column.
     """
+    
     X = df.drop(columns=[value_col]).values
     values = df[value_col].values
 
@@ -1342,6 +1533,99 @@ def plot_reductions(results: dict, values: np.ndarray,
 
     plt.show()
 
+
+def plot_projection_grid_seaborn(matrices,
+                                 labels,
+                                 rep_names,
+                                 highlight_index=None,
+                                 proj_names = ["PCA", "t-SNE", "UMAP", "Isomap", "FactorAnalysis", "MDS", "TruncatedSVD", "KernelPCA"],
+                                 ):
+    """
+    matrices  : list of arrays [(n_samples, d1), ..., (n_samples, dk)]
+    labels    : (n_samples,)
+    rep_names : list of strings
+    """
+
+    sns.set_theme(style="whitegrid", context="notebook", font_scale=1.05)
+
+    matrices = [np.asarray(X) for X in matrices]
+    labels = np.asarray(labels)
+
+    n_reps = len(matrices)
+    
+    if proj_names == 'all':
+        n_col = 8
+    else:
+        n_col = len(proj_names)
+
+    plt.figure(figsize=(4*n_col, 3.3 * n_reps))
+    fig, axes = plt.subplots(n_reps, n_col, figsize=(4*n_col, 3.3 * n_reps), squeeze=False)
+
+    # Decide if labels are continuous or categorical
+    is_continuous = np.issubdtype(labels.dtype, np.floating)
+
+    palette = "viridis" if is_continuous else "tab10"
+
+    for i, (X, rep_name) in enumerate(zip(matrices, rep_names)):
+
+        # Standardization (critical)
+        Xs = StandardScaler().fit_transform(X)
+
+        projections_func = {
+            "PCA": PCA(n_components=2, random_state=42),
+            "t-SNE": TSNE(n_components=2, perplexity=30, learning_rate="auto", init="pca", random_state=42),
+            "UMAP": umap.UMAP(n_components=2, n_neighbors=15, min_dist=0.1, random_state=42),
+            "Isomap": Isomap(n_components=2, n_neighbors=15),
+            "FactorAnalysis": FactorAnalysis(n_components=2, random_state=42),
+            "MDS": MDS(n_components=2, random_state=42, n_init=1, max_iter=300),
+            "TruncatedSVD": TruncatedSVD(n_components=2, random_state=42),
+            "KernelPCA":KernelPCA(n_components=2, kernel="rbf", random_state=42),
+        }
+        if proj_names == 'all':
+            projections = {k:projections_func[k].fit_transform(Xs) for k in projections_func.keys()}
+        else:    
+            projections = {k:projections_func[k].fit_transform(Xs) for k in proj_names}
+
+        for j, (pname, Z) in enumerate(projections.items()):
+
+            ax = axes[i, j]
+
+            sns.scatterplot(x=Z[:, 0], y=Z[:, 1], hue=labels, palette=palette, ax=ax, s=35, alpha=0.85, linewidth=0, legend=False)
+            if highlight_index is not None:
+                ax.scatter(Z[highlight_index, 0], Z[highlight_index, 1], color="red", s=20, zorder=5)
+                
+            # sns.scatterplot(x=Z[:, 0], y=Z[:, 1], hue=labels, palette=palette, ax=ax, s=35, alpha=0.85, linewidth=0, legend=(i == 0 and j == 2))
+
+            if i == 0:
+                ax.set_title(pname, fontsize=20, fontweight="bold")
+
+            if j == 0:
+                ax.set_ylabel(rep_name, fontsize=20, fontweight="bold")
+            else:
+                ax.set_ylabel("")
+
+            ax.set_xlabel("")
+            ax.set_xticks([])
+            ax.set_yticks([])
+
+    if is_continuous:
+        norm = plt.Normalize(labels.min(), labels.max())
+        sm = plt.cm.ScalarMappable(cmap="viridis", norm=norm)
+        sm.set_array([])
+
+        cax = fig.add_axes([1.01, 0.12, 0.018, 0.76])
+        # cax = fig.add_axes([0.92, 0.15, 0.02, 0.7])  # [left, bottom, width, height]
+        cbar = fig.colorbar(sm, cax=cax)
+        cbar.set_label("Total Clearance", fontsize=22, fontweight="bold")
+        cbar.ax.tick_params(labelsize=20)
+        for tick in cbar.ax.get_yticklabels():
+            tick.set_fontweight('bold')
+
+
+    plt.suptitle("2D Projections of Different Representations", fontsize=25, fontweight="bold", y=1.02)
+
+    plt.tight_layout()
+    plt.show()
 
 
 def plot_3d(
@@ -1445,7 +1729,15 @@ def plot_2d(matrices=None,
             fig_size=(8, 8),
             names=None,
             X=None,
-            Y=None):
+            Y=None,
+            scatter_labels = False,
+            title_fontsize=25,
+            xticks = False,
+            yticks = False,
+            xtickslabels = False,
+            ytickslabels = False,
+            legend_loc = 'upper center',
+            ):
     """
     Plot 1D or 2D matrices as 2D scatter plots.
 
@@ -1487,7 +1779,7 @@ def plot_2d(matrices=None,
     # Set up plot
     fig = plt.figure(figsize=fig_size)
     plt.grid(color='gray', linestyle='--', linewidth=0.8)
-    plt.title(title, fontsize=16, fontweight='bold', color='darkgreen')
+    plt.title(title, fontsize=title_fontsize, fontweight='bold', color='darkgreen')
 
     # Plot each matrix
     for idx, matrix in enumerate(matrices):
@@ -1509,7 +1801,10 @@ def plot_2d(matrices=None,
             print(f"Skipping matrix at index {idx}: not 1D or 2D")
             continue
 
-        plt.scatter(x_vals, y_vals, color=next(color_iter), label=f"Set {idx+1}")
+        if scatter_labels:
+            plt.scatter(x_vals, y_vals, color=next(color_iter), label=scatter_labels[idx], s = title_fontsize/1)
+        else:
+            plt.scatter(x_vals, y_vals, color=next(color_iter), label=f"Set {idx+1}", s = title_fontsize/1)
 
     # Annotations (if applicable)
     if names:
@@ -1528,10 +1823,18 @@ def plot_2d(matrices=None,
             for name, x, y in zip(names, X, Y):
                 plt.annotate(name, (x, y), textcoords="offset points", xytext=(0, -10), ha='center')
 
+    if xticks:
+        xticks = list(xticks)
+        plt.xticks(xticks, xtickslabels if len(xticks) == len(xtickslabels) else xticks)
+    if yticks:
+        yticks = list(yticks)
+        plt.yticks(yticks, ytickslabels if len(yticks) == len(ytickslabels) else yticks)
     # Axes labels
-    plt.xlabel(x_label, labelpad=10, fontsize=14)
-    plt.ylabel(y_label, labelpad=10, fontsize=14)
-    plt.legend()
+    plt.xlabel(x_label, labelpad=10, fontsize=title_fontsize-3)
+    plt.ylabel(y_label, labelpad=10, fontsize=title_fontsize-3)
+    plt.xticks(fontsize=title_fontsize-5)
+    plt.yticks(fontsize=title_fontsize-5)
+    plt.legend(fontsize=title_fontsize-8, loc=legend_loc, frameon=True)
     plt.tight_layout()
     plt.show()
 
@@ -2260,6 +2563,9 @@ def hierarchical_feature_selection(X_train: pd.DataFrame,
                                    min_impurity_decrease: float = 0,
                                    bootstrap: bool = True
                                    ) -> List[str]:
+    ''' Output:  
+            feature_names: the selected features list
+    '''
     
     X_train_ = X_train.copy()
     y_train_ = y_train.copy()
@@ -2346,12 +2652,18 @@ def data_stat(data_list: List[float]) -> Tuple[float, float, float, float, float
     mean_value = np.mean(data)
     median_value = np.median(data)
     std_value = data.std()
+    Q1 = np.percentile(data, 25)
+    Q3 = np.percentile(data, 75)
+    IQR = Q3 - Q1
+    lower = Q1 - 1.5 * IQR
+    upper = Q3 + 1.5 * IQR
     
     # Approximate mode using histogram bin with the highest count
     counts, bins = np.histogram(data, bins=30)
     mode_value = bins[np.argmax(counts)]
     
-    return min_value, max_value, mean_value, median_value, mode_value, std_value
+    return {'Min': min_value, 'Max': max_value, 'Mean': mean_value, 'Median': median_value, 'Mode': mode_value,
+            'Std': std_value, 'Q1': Q1, 'Q3': Q3, 'IQR': IQR, 'Lower': lower, 'Upper': upper}
 
 def find_outliers_iqr(df, column):
     
@@ -2362,6 +2674,368 @@ def find_outliers_iqr(df, column):
     upper = Q3 + 1.5 * IQR
     
     return df[(df[column] < lower) | (df[column] > upper)]
+
+
+def get_outliers(df, columns=None, multiplier=1.5, verbose=False):
+    """
+    Identify outliers and non-outlier ranges for specific numeric columns 
+    in a DataFrame using the Interquartile Range (IQR) method.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input DataFrame.
+    columns : list, optional
+        List of column names to analyze. If None, all numeric columns are used.
+    multiplier : float, optional (default=1.5)
+        The multiplier for the IQR to determine outlier thresholds.
+        (1.5 for mild, 3 for extreme outliers.)
+    verbose : bool, optional (default=True)
+        If True, prints concise summary info.
+
+    Returns
+    -------
+    summary_df : pandas.DataFrame
+        DataFrame summarizing bounds, IQR, and outlier counts for each column.
+    outliers_dict : dict
+        Dictionary containing lists of outlier values and ranges per column.
+    cleaned_df : pandas.DataFrame
+        Copy of the input dataframe with outliers replaced by NaN (for optional cleaning).
+    """
+
+    # Determine which columns to use
+    if columns is None:
+        columns = df.select_dtypes(include='number').columns.tolist()[:5]
+    else:
+        columns = [col for col in columns if col in df.columns]
+
+    if not columns:
+        raise ValueError("No valid numeric columns found for analysis.")
+
+    outlier_info = {}
+
+    for col in columns:
+        Q1 = df[col].quantile(0.25)
+        Q3 = df[col].quantile(0.75)
+        IQR = Q3 - Q1
+
+        lower_bound = Q1 - multiplier * IQR
+        upper_bound = Q3 + multiplier * IQR
+
+        mask_outliers = (df[col] < lower_bound) | (df[col] > upper_bound)
+        outlier_values = df.loc[mask_outliers, col].tolist()
+
+        outlier_info[col] = {
+            "Q1": Q1,
+            "Q3": Q3,
+            "IQR": IQR,
+            "lower_bound": lower_bound,
+            "upper_bound": upper_bound,
+            "num_outliers": mask_outliers.sum(),
+            "outlier_indices": df.index[mask_outliers].tolist(),
+            "outlier_values": outlier_values,
+            "non_outlier_range": (lower_bound, upper_bound)
+        }
+
+    summary_df = pd.DataFrame(outlier_info).T
+    cleaned_df = df.copy()
+
+    # Replace outliers with NaN in the chosen columns only
+    for col in columns:
+        lb, ub = summary_df.loc[col, ['lower_bound', 'upper_bound']]
+        cleaned_df.loc[(cleaned_df[col] < lb) | (cleaned_df[col] > ub), col] = pd.NA
+
+    if verbose:
+        print("\n=== Outlier Summary (IQR Method) ===")
+        print(summary_df[['lower_bound', 'upper_bound', 'num_outliers']])
+
+    return summary_df, outlier_info, cleaned_df.dropna(how='any')
+
+def bland_altman_plot(y_true, y_pred, title='', pad_frac=0.05,
+                      x_lims=(-10, 10), y_lims=(-10, 10), return_stats=False, color='red'):
+    
+    y_true = np.array(y_true)
+    y_pred = np.array(y_pred)
+
+    mean_values = (y_true + y_pred) / 2
+    diff_values = y_true - y_pred
+
+    # Mean and standard deviation of differences
+    mean_diff = np.mean(diff_values)
+    std_diff = np.std(diff_values, ddof=1)
+
+    # Limits of Agreement (LOA)
+    loa_upper = mean_diff + 1.96 * std_diff
+    loa_lower = mean_diff - 1.96 * std_diff
+
+    # Calculate percentage of points within LOA
+    within_loa = np.sum((diff_values >= loa_lower) & (diff_values <= loa_upper))
+    total_points = len(diff_values)
+    percent_within_loa = (within_loa / total_points) * 100
+    
+    # ---------- axis limits (data-driven) ----------
+    def padded_limits(values, frac):
+        vmin, vmax = np.min(values), np.max(values)
+        span = vmax - vmin
+        if span == 0:
+            span = abs(vmin) if vmin != 0 else 1.0
+        pad = frac * span
+        return vmin - pad, vmax + pad
+
+    x_lims = padded_limits(mean_values, pad_frac)
+    y_lims = padded_limits(np.r_[diff_values, loa_upper, loa_lower], pad_frac)
+
+
+    # Plotting
+    plt.figure(figsize=(8, 6))
+    plt.scatter(mean_values, diff_values, color=color, alpha=0.6, label=title)
+    plt.axhline(mean_diff, color='black', linestyle='-')
+    plt.axhline(loa_upper, color='blue', linestyle='-')
+    plt.axhline(loa_lower, color='blue', linestyle='-')
+    plt.xlabel('Mean of True and Predicted Values', fontsize=20)
+    plt.ylabel('Difference (True - Predicted)', fontsize=20)
+    plt.xlim(x_lims)
+    plt.ylim(y_lims)
+
+    # Smart ticks
+    # num_xticks = int(((x_lims[1] - x_lims[0]) * 2 + 1))
+    # # num_yticks = int(((y_lims[1] - y_lims[0]) * 2 + 1))
+    # plt.xticks(np.round(np.linspace(x_lims[0], x_lims[1], num_xticks), 2), fontsize=15)
+    # # plt.yticks(np.round(np.linspace(y_lims[0], y_lims[1], num_yticks), 2), fontsize=15)
+    # plt.yticks([-2.5, -2, -1.5, -1, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 2.5])
+
+    # Annotations for mean and LOA lines
+    x_text_pos = x_lims[1]
+
+    plt.text(x_text_pos, loa_upper + 0.1, f'+1.96 SD ({loa_upper:.2f})', fontsize=14, color='blue', ha='right', fontweight='bold')
+    plt.text(x_text_pos, mean_diff + 0.1, f'Mean ({mean_diff:.2f})', fontsize=14, color='black', ha='right', fontweight='bold')
+    plt.text(x_text_pos, loa_lower + 0.1, f'-1.96 SD ({loa_lower:.2f})', fontsize=14, color='blue', ha='right', fontweight='bold')
+
+    # Vertical double-arrow between LOA lines
+    x_arrow = x_lims[0] + 0.3  # Slightly to the right of y-axis
+    plt.annotate(
+        '', 
+        xy=(x_arrow, loa_upper), 
+        xytext=(x_arrow, loa_lower), 
+        arrowprops=dict(arrowstyle='<->', color='purple', lw=2)
+    )
+
+    # Add percentage text next to arrow
+    plt.text(x_arrow - 0.1, (loa_upper + loa_lower) / 2+0.8, f'Within: {percent_within_loa:.1f}%', 
+             va='top', ha='right', fontsize=13, color='purple', fontweight='bold', rotation=90)
+
+    plt.grid(True, alpha=0.2)
+    plt.legend(fontsize=15)
+    plt.tight_layout()
+    plt.show()
+
+    if return_stats:
+        return mean_diff, std_diff, loa_upper, loa_lower, percent_within_loa
+    
+    
+def parity_plot_with_folds(
+    y_true,
+    y_pred,
+    title='',
+    color='red',
+    alpha=0.6,
+    pad_frac=0.05,
+    return_stats=False,
+    figsize = (12, 6),
+    title_fontsize=20,
+    folds = [2, 3],
+    base_colours = ['blue', 'green', 'violet', 'pink', 'orange', 'gray', 'yellow'],
+):
+    """
+    Parity (x vs y) plot with y=x, 2-fold and 3-fold error bands.
+
+    Parameters
+    ----------
+    y_true, y_pred : array-like
+        True and predicted values.
+    title : str
+        Legend label.
+    color : str
+        Scatter color.
+    alpha : float
+        Scatter transparency.
+    pad_frac : float
+        Fractional padding for axis limits.
+    return_stats : bool
+        If True, returns fold-accuracy percentages.
+
+    Returns
+    -------
+    dict (optional)
+        Percent of points within 2-fold and 3-fold ranges.
+    """
+
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+
+    if y_true.shape != y_pred.shape:
+        raise ValueError("y_true and y_pred must have the same shape.")
+
+    # ---------- axis limits ----------
+    all_vals = np.concatenate([y_true, y_pred])
+    vmin, vmax = np.min(all_vals), np.max(all_vals)
+    span = vmax - vmin if vmax > vmin else max(abs(vmin), 1.0)
+    pad = pad_frac * span
+
+    xlims = (vmin - pad, vmax + pad)
+    ylims = xlims
+
+    # ---------- reference lines ----------
+    x = np.linspace(*xlims, 500)
+
+    # ---------- plot ----------
+    plt.figure(figsize=figsize)
+
+    plt.scatter(y_true, y_pred, color=color, alpha=alpha, label=title)
+
+    # Perfect fit
+    plt.plot(x, x, 'k-', lw=2, label='y = x')
+
+    # 2-fold
+    # plt.plot(x, 2 * x, 'b--', lw=1.5, label='2-fold')
+    # plt.plot(x, 0.5 * x, 'b--', lw=1.5)
+
+    # # 3-fold
+    # plt.plot(x, 3 * x, 'g-.', lw=1.5, label='3-fold')
+    # plt.plot(x, x / 3, 'g-.', lw=1.5)
+    
+    all_colors = get_colors(colours=base_colours)
+    for f in folds:
+        C = next(all_colors)
+        plt.plot(x, f * x, '-.', lw=1.5, label=f'{f}-fold', color=C)
+        plt.plot(x, x / f, '-.', lw=1.5, color=C)
+
+    plt.xlim(xlims)
+    plt.ylim(ylims)
+
+    plt.xlabel('True Values', fontsize=title_fontsize-3)
+    plt.ylabel('Predicted Values', fontsize=title_fontsize-3)
+    plt.xticks(fontsize = title_fontsize-4)
+    plt.yticks(fontsize = title_fontsize-4)
+
+    plt.grid(True, alpha=0.25)
+    plt.legend(fontsize=title_fontsize-8)
+    plt.tight_layout()
+    plt.show()
+
+    # ---------- fold statistics ----------
+    with np.errstate(divide='ignore', invalid='ignore'):
+        ratio = np.maximum(y_pred / y_true, y_true / y_pred)
+
+    within_2fold = np.mean(ratio <= 2) * 100
+    within_3fold = np.mean(ratio <= 3) * 100
+
+    if return_stats:
+        return {
+            "within_2fold_percent": within_2fold,
+            "within_3fold_percent": within_3fold
+        }
+        
+def parity_plot_with_folds_and_percent(
+    y_true,
+    y_pred,
+    title='',
+    color='red',
+    alpha=0.6,
+    pad_frac=0.05,
+    percent_errors=(0.10, 0.20),
+    base_colours = ['blue', 'green', 'violet', 'pink', 'orange', 'gray', 'yellow'],
+    return_stats=False,
+    folds = [2, 3],
+    figsize=(7, 7)
+):
+    """
+    Parity (x vs y) plot with:
+      - y = x
+      - 2-fold, 3-fold bands
+      - ±percentage error bands
+
+    Parameters
+    ----------
+    y_true, y_pred : array-like
+        True and predicted values.
+    percent_errors : tuple
+        Percentage errors as fractions (e.g., 0.10 = 10%).
+    """
+
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+
+    if y_true.shape != y_pred.shape:
+        raise ValueError("y_true and y_pred must have the same shape.")
+
+    # ---------- axis limits ----------
+    all_vals = np.concatenate([y_true, y_pred])
+    vmin, vmax = np.min(all_vals), np.max(all_vals)
+    span = vmax - vmin if vmax > vmin else max(abs(vmin), 1.0)
+    pad = pad_frac * span
+
+    xlims = (vmin - pad, vmax + pad)
+    ylims = xlims
+
+    x = np.linspace(*xlims, 600)
+
+    # ---------- plot ----------
+    plt.figure(figsize=figsize)
+
+    plt.scatter(y_true, y_pred, color=color, alpha=alpha, label=title)
+
+    # Perfect fit
+    plt.plot(x, x, 'k-', lw=2, label='y = x')
+
+    # Fold-error bands
+    plt.plot(x, 2 * x, 'b--', lw=1.4, label='2-fold')
+    plt.plot(x, 0.5 * x, 'b--', lw=1.4)
+
+    plt.plot(x, 3 * x, 'g--', lw=1.4, label='3-fold')
+    plt.plot(x, x / 3, 'g--', lw=1.4)
+    
+    all_colors = get_colors(colours=base_colours)
+    for f in folds:
+        C = next(all_colors)
+        plt.plot(x, f * x, '-.', lw=1.5, label=f'{f}-fold', color=C)
+        plt.plot(x, x / f, '-.', lw=1.5, color=C)
+
+    # Percentage-error bands
+    for p in percent_errors:
+        plt.plot(x, (1 + p)*x, color='orange', ls=':', lw=1.6,
+                 label=f'±{int(p*100)}%' if p == percent_errors[0] else None)
+        plt.plot(x, (1 - p)*x, color='orange', ls=':', lw=1.6)
+
+    plt.xlim(xlims)
+    plt.ylim(ylims)
+
+    plt.xlabel('True Values', fontsize=16)
+    plt.ylabel('Predicted Values', fontsize=16)
+
+    plt.grid(True, alpha=0.25)
+    plt.legend(fontsize=12)
+    plt.tight_layout()
+    plt.show()
+
+    # ---------- statistics ----------
+    stats = {}
+
+    # Fold accuracy
+    with np.errstate(divide='ignore', invalid='ignore'):
+        ratio = np.maximum(y_pred / y_true, y_true / y_pred)
+
+    stats["within_2fold_percent"] = np.mean(ratio <= 2) * 100
+    stats["within_3fold_percent"] = np.mean(ratio <= 3) * 100
+
+    # Percentage accuracy
+    for p in percent_errors:
+        mask = np.abs(y_pred - y_true) <= p * np.abs(y_true)
+        stats[f"within_{int(p*100)}pct_percent"] = np.mean(mask) * 100
+
+    if return_stats:
+        return stats
+
 
 
 def plot_distribution_compair(data_list1: List[np.ndarray | list],
@@ -2426,9 +3100,11 @@ def plot_distribution_compair(data_list1: List[np.ndarray | list],
 
     for i, data in enumerate(data_list1):
         
-        min_value1, max_value1, mean_value1, median_value1, mode_value1, _ = data_stat(data_list1[i])
-        min_value2, max_value2, mean_value2, median_value2, mode_value2, _ = data_stat(data_list2[i])
-        
+        _data_stat1 = data_stat(data_list1[i])
+        min_value1, max_value1, mean_value1, median_value1, mode_value1 = _data_stat1['Min'], _data_stat1['Max'], _data_stat1['Mean'], _data_stat1['Median'], _data_stat1['Mode']
+        _data_stat2 = data_stat(data_list2[i])
+        min_value2, max_value2, mean_value2, median_value2, mode_value2 = _data_stat2['Min'], _data_stat2['Max'], _data_stat2['Mean'], _data_stat2['Median'], _data_stat2['Mode']
+
         if x_lims:
             min_x, max_x = x_lims[0], x_lims[1]
             
@@ -2574,7 +3250,8 @@ def plot_multiple_distribution(data_list1, n_cols=0, figsize=None, subplot_title
         ax = axes[r, c]
 
         # Compute stats (replace with your function)
-        min_value1, max_value1, mean_value1, median_value1, mode_value1, _ = data_stat(data)
+        _data_stat = data_stat(data)
+        min_value1, max_value1, mean_value1, median_value1, mode_value1 = _data_stat['Min'], _data_stat['Max'], _data_stat['Mean'], _data_stat['Median'], _data_stat['Mode']
         sns.kdeplot(data, ax=ax, color='green', linewidth=1, fill=True, edgecolor="black", alpha=alpha, log_scale=log_scale)
 
         ax.set_title(f'{subplot_type}: {subplot_title[idx]}', fontsize=ax_label_fontsize + 3)
@@ -2612,7 +3289,7 @@ def plot_hist_compair(data_list1: List[np.ndarray | list],
                       bins: int = 30,
                       alpha: float = 0.4,
                       figsize: tuple = (12, 12),
-                      suptitle: str = 'Suptitle',
+                      suptitle: str = '',
                       savepath: str = '',
                       ax1_label: str = 'Data - 1',
                       ax2_label: str = 'Data - 2',
@@ -2677,9 +3354,11 @@ def plot_hist_compair(data_list1: List[np.ndarray | list],
     plt.suptitle(suptitle, fontsize=ax_label_fontsize+10, fontweight='bold')
     for i, _ in enumerate(data_list1):
         
-        min_value1, max_value1, mean_value1, median_value1, mode_value1, _ = data_stat(data_list1[i])
-        min_value2, max_value2, mean_value2, median_value2, mode_value2, _ = data_stat(data_list2[i])
-        
+        _data_stat1 = data_stat(data_list1[i])
+        _data_stat2 = data_stat(data_list2[i])
+        min_value1, max_value1, mean_value1, median_value1, mode_value1 = _data_stat1['Min'], _data_stat1['Max'], _data_stat1['Mean'], _data_stat1['Median'], _data_stat1['Mode']
+        min_value2, max_value2, mean_value2, median_value2, mode_value2 = _data_stat2['Min'], _data_stat2['Max'], _data_stat2['Mean'], _data_stat2['Median'], _data_stat2['Mode']
+
         if x_lims:
             min_x, max_x = x_lims[0], x_lims[1]
             
@@ -2829,7 +3508,7 @@ def plot_hist_compair(data_list1: List[np.ndarray | list],
 def plot_multiple_hist(data_list1, n_cols=0, figsize=None, subplot_title=None,
                     suptitle="Histograms", x_label="Property", subplot_type='Dataset',
                     ax_label_fontsize=12, bins=30, alpha=0.6, kde=True,
-                    x_lims=None, savepath=None, stat="density"):
+                    x_lims=None, savepath=None, stat="density", add_count=False):
     
     """
     Generates a figure with multiple Histograms for visualizing the frequency 
@@ -2919,16 +3598,17 @@ def plot_multiple_hist(data_list1, n_cols=0, figsize=None, subplot_title=None,
         ax = axes[r, c]
 
         # Compute stats (replace with your function)
-        min_value1, max_value1, mean_value1, median_value1, mode_value1, _ = data_stat(data)
+        _data_stat = data_stat(data)
+        min_value1, max_value1, mean_value1, median_value1, mode_value1 = _data_stat['Min'], _data_stat['Max'], _data_stat['Mean'], _data_stat['Median'], _data_stat['Mode']
 
         sns.histplot(data, ax=ax, color='green', bins=bins, stat=stat,
                      edgecolor='black', linewidth=1, alpha=alpha)
         if kde:
             sns.kdeplot(data, ax=ax, color='red', linewidth=1)
 
-        ax.set_title(f'{subplot_type}: {subplot_title[idx]}', fontsize=ax_label_fontsize + 3)
-        ax.set_xlabel(x_label, fontsize=ax_label_fontsize)
-        ax.set_ylabel(stat.capitalize(), fontsize=ax_label_fontsize)
+        ax.set_title(f'{subplot_type}: {subplot_title[idx]}', fontsize=ax_label_fontsize + 3, fontweight='bold')
+        ax.set_xlabel(x_label, fontsize=ax_label_fontsize, fontweight='bold')
+        ax.set_ylabel(stat.capitalize(), fontsize=ax_label_fontsize, fontweight='bold')
 
         # Vertical lines
         ax.axvline(mean_value1, color='r', linestyle='-.', label=f'Mean: {mean_value1:.2f}')
@@ -2940,6 +3620,21 @@ def plot_multiple_hist(data_list1, n_cols=0, figsize=None, subplot_title=None,
         ax.legend(loc='upper right', fontsize=ax_label_fontsize-1)
         ax.grid()
         ax.set_xlim(min_x, max_x)
+        
+        if add_count:
+            for patch in ax.patches:
+                height = patch.get_height()
+                if height > 0:
+                    ax.annotate(
+                        f'{int(height)}',
+                        (patch.get_x() + patch.get_width() / 2, height),
+                        ha='center',
+                        va='bottom',
+                        fontsize=10,
+                        color='black',
+                        xytext=(0, 3),
+                        textcoords='offset points'
+                    )
 
     # --- Remove empty axes ---
     for idx in range(n_datasets, rows * cols):
@@ -3140,7 +3835,7 @@ def plot_stacked_bars(df, target_col, feature_cols='all', class_order=None,
         plt.show()
 
 
-def percentage_within_fold_change(y_true, y_pred, fold=2):
+def percentage_within_fold_change(y_true, y_pred, fold=2, transform_func=lambda x: x):
     """
     Calculate the percentage of repeated measurements within a given fold range.
 
@@ -3152,8 +3847,8 @@ def percentage_within_fold_change(y_true, y_pred, fold=2):
     Returns:
     - float: Percentage of values within the specified fold range.
     """
-    y_true = np.array(y_true)
-    y_pred = np.array(y_pred)
+    y_true = transform_func(np.array(y_true, dtype=float))
+    y_pred = transform_func(np.array(y_pred, dtype=float))
     
     # Ensure there are no zero values to avoid division issues
     y_true[y_true == 0] = 1e-3
@@ -3169,7 +3864,7 @@ def percentage_within_fold_change(y_true, y_pred, fold=2):
     
     return percentage, max_, min_
 
-def geometric_mean_fold_error(y_true, y_pred):
+def geometric_mean_fold_error(y_true, y_pred, transform_func=lambda x: x):
     
     """
     Calculate Geometric Mean Fold Error (GMFE).
@@ -3181,8 +3876,8 @@ def geometric_mean_fold_error(y_true, y_pred):
     Returns:
     - GMFE: float
     """
-    y_true = np.array(y_true)
-    y_pred = np.array(y_pred)
+    y_true = transform_func(np.array(y_true, dtype=float))
+    y_pred = transform_func(np.array(y_pred, dtype=float))
     
     # Avoid division by zero
     if np.any(y_true <= 0):
@@ -3207,11 +3902,13 @@ def geometric_mean_fold_error(y_true, y_pred):
 
 
 
-def min_max(y_true, y_pred, range_list, eps = 0.5):
+def min_max(y_true, y_pred, range_list, eps = 0.5, transform_func=lambda x: x):
     
     range_list = range_list.apply(lambda x: ast.literal_eval(x)).tolist()
-    y_true = np.array(y_true)
-    y_pred = np.array(y_pred)
+    
+    y_true = transform_func(np.array(y_true, dtype=float))
+    y_pred = transform_func(np.array(y_pred, dtype=float))
+    
     num = 0
     for i in range(len(y_true)):
         x = y_pred[i]
@@ -3226,7 +3923,7 @@ def min_max(y_true, y_pred, range_list, eps = 0.5):
     
     return percent
 
-def gmfe(y_true, y_pred, eps=1e-8, base=10):
+def gmfe(y_true, y_pred, eps=1e-8, base=10, transform_func=lambda x: x):
     """
     Generalized Geometric Mean Fold Error (GMFE).
     
@@ -3246,8 +3943,8 @@ def gmfe(y_true, y_pred, eps=1e-8, base=10):
     float
         Geometric Mean Fold Error.
     """
-    y_true = np.array(y_true, dtype=float)
-    y_pred = np.array(y_pred, dtype=float)
+    y_true = transform_func(np.array(y_true, dtype=float))
+    y_pred = transform_func(np.array(y_pred, dtype=float))
 
     # Ratios with absolute values to avoid undefined logs
     ratio = (np.abs(y_pred) + eps) / (np.abs(y_true) + eps)
@@ -3261,7 +3958,8 @@ def gmfe(y_true, y_pred, eps=1e-8, base=10):
 
 def regression_test_metrics(y_true: np.ndarray[float] | List[float],
                  y_pred: np.ndarray[float] | List[float],
-                 transform_func=lambda x: x
+                 transform_func=lambda x: x,
+                 fold_transform_fn=lambda x:x
             ) -> OrderedDict[str, float]:
     
     '''
@@ -3285,21 +3983,147 @@ def regression_test_metrics(y_true: np.ndarray[float] | List[float],
     mae_test = mean_absolute_error(y_true, y_pred)
     r2_val_test = r2_score(y_true, y_pred)
     pcc = np.corrcoef(y_true, y_pred,)[0, 1]
-    fold2, _, _ = percentage_within_fold_change(y_true=10**y_true, y_pred=10**y_pred, fold=2)
-    fold3, _, _ = percentage_within_fold_change(y_true=10**y_true, y_pred=10**y_pred, fold=3)
-    fold5, _, _ = percentage_within_fold_change(y_true=10**y_true, y_pred=10**y_pred, fold=5)
-    _gmfe = gmfe(y_true=10**y_true, y_pred=10**y_pred,)
+    fold2, _, _ = percentage_within_fold_change(y_true=y_true, y_pred=y_pred, fold=2, transform_func=fold_transform_fn)
+    fold3, _, _ = percentage_within_fold_change(y_true=y_true, y_pred=y_pred, fold=3, transform_func=fold_transform_fn)
+    fold5, _, _ = percentage_within_fold_change(y_true=y_true, y_pred=y_pred, fold=5, transform_func=fold_transform_fn)
+    _gmfe = gmfe(y_true=y_true, y_pred=y_pred, transform_func=fold_transform_fn)
     
     
     results = OrderedDict({'mse':round(mse_test, 2),
+                           'r2':round(r2_val_test, 2),
                            'rmse':round(rmse_test, 2),
                            'mae':round(mae_test, 2),
-                           'r2':round(r2_val_test, 2),
+                           'PCC':round(pcc, 2),
+                           'GMFE':round(_gmfe, 2),
                            'fold2':round(fold2, 2),
                            'fold3':round(fold3, 2),
                            'fold5':round(fold5, 2),
-                           'PCC':round(pcc, 2),
-                           'GMFE':round(_gmfe, 2)
+                           })
+    
+    return results
+
+def q2_f1(
+    y_test_obs: Union[np.ndarray, pd.Series, list],
+    y_test_pred: Union[np.ndarray, pd.Series, list],
+    y_train_obs: Union[np.ndarray, pd.Series, list]
+) -> float:
+    """
+    Computes Q^2_{F_1}, the training-mean–referenced external predictive squared correlation coefficient.
+
+    Input:
+        - y_test_obs: Observed response values of the external test set
+        - y_test_pred: Model-predicted response values for the external test set
+        - y_train_obs: Observed response values of the training set
+
+    Output:
+        - Q^2_{F_1} value (float), measuring true external predictivity
+          relative to the training-set mean
+    """
+
+    y_test_obs = np.asarray(y_test_obs)
+    y_test_pred = np.asarray(y_test_pred)
+    y_train_obs = np.asarray(y_train_obs)
+
+    y_train_mean = np.mean(y_train_obs)
+
+    press = np.sum((y_test_obs - y_test_pred) ** 2)
+    denom = np.sum((y_test_obs - y_train_mean) ** 2)+1e-8
+
+    return 1.0 - press / denom
+
+
+def q2_f2(
+    y_test_obs: Union[np.ndarray, pd.Series, list],
+    y_test_pred: Union[np.ndarray, pd.Series, list]
+) -> float:
+    """
+    Computes Q^2_{F_2}, the test-mean–referenced external predictive squared correlation coefficient.
+
+    Input:
+        - y_test_obs: Observed response values of the external test set
+        - y_test_pred: Model-predicted response values for the external test set
+
+    Output:
+        - Q^2_{F_2} value (float), measuring explained variance
+          within the test set
+    """
+
+    y_test_obs = np.asarray(y_test_obs)
+    y_test_pred = np.asarray(y_test_pred)
+
+    y_test_mean = np.mean(y_test_obs)
+
+    press = np.sum((y_test_obs - y_test_pred) ** 2)
+    denom = np.sum((y_test_obs - y_test_mean) ** 2)+1e-8
+
+    return 1.0 - press / denom
+
+
+def q2_f3(
+    y_test_obs: Union[np.ndarray, pd.Series, list],
+    y_test_pred: Union[np.ndarray, pd.Series, list],
+    y_train_obs: Union[np.ndarray, pd.Series, list]
+) -> float:
+    """
+    Computes Q^2_{F_3}, the prediction-variance–referenced external predictive
+    squared correlation coefficient.
+
+    Input:
+        - y_test_obs: Observed response values of the external test set
+        - y_test_pred: Model-predicted response values for the external test set
+        - y_train_obs: Observed response values of the training set
+
+    Output:
+        - Q^2_{F_3} value (float), detecting systematic slope or scaling bias
+          in external predictions
+    """
+
+    y_test_obs = np.asarray(y_test_obs)
+    y_test_pred = np.asarray(y_test_pred)
+    y_train_obs = np.asarray(y_train_obs)
+
+    y_train_mean = np.mean(y_train_obs)
+
+    press = np.sum((y_test_obs - y_test_pred) ** 2)
+    denom = np.sum((y_test_pred - y_train_mean) ** 2)+1e-8
+
+    return 1.0 - press / denom
+
+
+
+def test_rf(model: RandomForestRegressor | SVC,
+            X_test: pd.DataFrame,
+            y_test: pd.DataFrame
+            ) -> OrderedDict[str, float]:
+    
+    '''
+    Input:
+        - model: Random Forest Model
+        - X_test: DataFrame Object
+        - y_test: Datafrane Object
+    
+    Output: A dictionary containing MSE, RMSE, MAE and r2 Values.
+    '''
+    
+    y_pred = model.predict(X_test.astype(np.float16))
+    y_prediced = np.array(y_pred)
+    y_test_eval = np.array(y_test)
+
+    # Calculate metrics on Test Set
+    rmse_test = root_mean_squared_error(y_test_eval, y_prediced)
+    mse_test = rmse_test**2
+    mae_test = mean_absolute_error(y_test_eval, y_prediced)
+    r2_val_test = r2_score(y_test_eval, y_prediced)
+    fold2, _, _ = percentage_within_fold_change(y_true=y_test_eval, y_pred=y_prediced, fold=2)
+    fold3, _, _ = percentage_within_fold_change(y_true=y_test_eval, y_pred=y_prediced, fold=3)
+    
+    
+    results = OrderedDict({'mse':round_up(mse_test, 2),
+                           'rmse':round_up(rmse_test, 2),
+                           'mae':round_up(mae_test, 2),
+                           'r2':round_up(r2_val_test, 2),
+                           'fold2':round_up(fold2, 2),
+                           'fold3':round_up(fold3, 2)
                            })
     
     return results

@@ -10,7 +10,6 @@ from torch.utils.data import Dataset
 from collections import Counter
 from tqdm import tqdm
 from multiprocessing import Pool, cpu_count
-from collections import Counter
 
 from logP_values import *
 
@@ -30,7 +29,9 @@ from Generalised_data_utils import selective_range_data_sampling
 __all__ = [
     'extract_features_from_smiles',
     'list_smiles2symbols_hybridization_chiraltype',
+    'compute_mean_std_welford',
     'list_to_onehot',
+    'list_to_onehot_oov',
     'get_element_properties',
     'get_atom_properties',
     'get_properties_smiles',
@@ -88,6 +89,31 @@ def extract_features_from_smiles(smi):
     except:
         pass
 
+def welford_update(x, n_total, mean, M2):
+    n = x.shape[0]
+    batch_mean = x.mean(dim=0)
+    delta = batch_mean - mean
+    mean += delta * (n / (n_total + n))
+    M2 += ((x - mean)**2).sum(dim=0)
+    n_total += n
+    return n_total, mean, M2
+
+def compute_mean_std_welford(dataset):
+    n_total = 0
+    mean = None
+    M2 = None
+
+    for data in dataset:
+        x = data.x
+        if mean is None:
+            mean = torch.zeros(x.shape[1])
+            M2 = torch.zeros(x.shape[1])
+        n_total, mean, M2 = welford_update(x, n_total, mean, M2)
+
+    variance = M2 / (n_total - 1)
+    std = torch.sqrt(variance)
+    std[std == 0] = 1.0
+    return mean, std
 
 def list_smiles2symbols_hybridization_chiraltype(smi_list, num_workers=int(cpu_count()/4)):
     
@@ -143,15 +169,35 @@ def list_smiles2symbols_hybridization_chiraltype(smi_list, num_workers=int(cpu_c
     return results
 
 
-def list_to_onehot(element, elements_list) -> list:
+def list_to_onehot(element, elements_list, val=1.0) -> list:
     
     onehot = [0.]*len(elements_list)
     idx = elements_list.index(element)
-    onehot[idx] = 1.0
+    onehot[idx] = val
     
     return onehot
 
+def list_to_onehot_oov(element, elements_list, val=1.0):
+    """
+    One-hot encoder with an OOV bucket.
+    - Boolean vector if val is 0 or 1.
+    - Float vector otherwise.
+    """
 
+    size = len(elements_list)
+    use_bool = float(val) in (0.0, 1.0)
+    onehot = [False] * (size + 1) if use_bool else [0.0] * (size + 1)
+
+    try:
+        idx = elements_list.index(element)
+    except:
+        idx = size
+    onehot[idx] = bool(val) if use_bool else val
+
+    return onehot
+
+
+## Use for CLint prediction (Old)
 def get_element_properties(symbol):
     
     data_elec = {
@@ -186,15 +232,51 @@ def get_element_properties(symbol):
     else:
         print(f"Element '{symbol}' not found in the data.")
         
+## Updated few values (New)        
+def get_element_properties_updated(symbol):
+    
+    data_elec = {
+        "H": {"VdW Radius": 120, "Sanderson Electronegativity": 2.592, "Polarizability": 4.5071, "Pauling Electronegativity": 2.2},
+        "B": {"VdW Radius": 191, "Sanderson Electronegativity": 2.275, "Polarizability": 20.5, "Pauling Electronegativity": 2.04},
+        "C": {"VdW Radius": 177, "Sanderson Electronegativity": 2.746, "Polarizability": 11.3, "Pauling Electronegativity": 2.55},
+        "N": {"VdW Radius": 166, "Sanderson Electronegativity": 3.194, "Polarizability": 7.4, "Pauling Electronegativity": 3.04},
+        "O": {"VdW Radius": 150, "Sanderson Electronegativity": 3.654, "Polarizability": 5.3, "Pauling Electronegativity": 3.44},
+        "F": {"VdW Radius": 146, "Sanderson Electronegativity": 4.000, "Polarizability": 3.74, "Pauling Electronegativity": 3.98},
+        "Na": {"VdW Radius": 250, "Sanderson Electronegativity": 0.56, "Polarizability": 162.7, "Pauling Electronegativity": 0.93},
+        "Al": {"VdW Radius": 225, "Sanderson Electronegativity": 1.714, "Polarizability": 57.8, "Pauling Electronegativity": 1.61},
+        "Si": {"VdW Radius": 219, "Sanderson Electronegativity": 2.138, "Polarizability": 37.3, "Pauling Electronegativity": 1.9},
+        "P": {"VdW Radius": 190, "Sanderson Electronegativity": 2.515, "Polarizability": 25, "Pauling Electronegativity": 2.19},
+        "S": {"VdW Radius": 189, "Sanderson Electronegativity": 2.957, "Polarizability": 19.4, "Pauling Electronegativity": 2.58},
+        "Cl": {"VdW Radius": 182, "Sanderson Electronegativity": 3.475, "Polarizability": 14.6, "Pauling Electronegativity": 3.16},
+        "K": {"VdW Radius": 273, "Sanderson Electronegativity": 0.45, "Polarizability": 289.7, "Pauling Electronegativity": 0.82},
+        "Ca": {"VdW Radius": 262, "Sanderson Electronegativity": 0.950, "Polarizability": 160.8, "Pauling Electronegativity": 1.00},
+        "Fe": {"VdW Radius": 244, "Sanderson Electronegativity": 2.200, "Polarizability": 62.0, "Pauling Electronegativity": 1.83},
+        "Co": {"VdW Radius": 240, "Sanderson Electronegativity": 2.560, "Polarizability": 55.0, "Pauling Electronegativity": 1.88},
+        "Ni": {"VdW Radius": 240, "Sanderson Electronegativity": 1.940, "Polarizability": 49.0, "Pauling Electronegativity": 1.91},
+        "Cu": {"VdW Radius": 238, "Sanderson Electronegativity": 1.980, "Polarizability": 46.5, "Pauling Electronegativity": 1.9},
+        "Zn": {"VdW Radius": 239, "Sanderson Electronegativity": 2.223, "Polarizability": 38.67, "Pauling Electronegativity": 1.65},
+        "Se": {"VdW Radius": 182, "Sanderson Electronegativity": 3.01, "Polarizability": 28.9, "Pauling Electronegativity": 2.55},
+        "Br": {"VdW Radius": 186, "Sanderson Electronegativity": 3.219, "Polarizability": 21.0, "Pauling Electronegativity": 2.96},
+        "Sn": {"VdW Radius": 242, "Sanderson Electronegativity": 1.490, "Polarizability": 53.0, "Pauling Electronegativity": 1.96},
+        "I": {"VdW Radius": 204, "Sanderson Electronegativity": 2.778, "Polarizability": 32.9, "Pauling Electronegativity": 2.66},
+    }
+    
+    if symbol in data_elec:
+        return data_elec[symbol]
+    else:
+        print(f"Element '{symbol}' not found in the data.")
+        
         
 def get_atom_properties(atom):
     
     ## Atom Properties from RDKit
     atom_properties = [
         atom.GetAtomicNum(),               
-        atom.GetDegree(),                  
+        atom.GetDegree(), 
+        # atom.GetTotalDegree(),                 
         atom.GetFormalCharge(),            
-        atom.GetTotalNumHs(),              
+        atom.GetTotalNumHs(),  
+        # atom.GetTotalValence(),            
         atom.GetExplicitValence(),         
         atom.GetImplicitValence(),         
         atom.GetNumExplicitHs(),           
@@ -228,8 +310,8 @@ def get_properties_smiles(smiles):
 
     # Iterate over atoms in the molecule and get properties
     for i, atom in enumerate(mol.GetAtoms()):
-        GasteigerCharge = float(atom.GetProp("_GasteigerCharge")) if atom.HasProp("_GasteigerCharge") else 0.
         atom_properties = get_atom_properties(atom)
+        GasteigerCharge = float(atom.GetProp("_GasteigerCharge")) if atom.HasProp("_GasteigerCharge") else 0.
         atom_properties.append(GasteigerCharge)
         all_properties[i] = atom_properties
          
@@ -410,6 +492,10 @@ def get_atom_info_vector(smiles,
         # '3d_descriptors':np.array(atom_descriptors_3d),
         'neighbour_info':np.array(neighbour_info_list)
     }
+    # atom_descs = ['AtomicNum', 'Degree', 'FormalCharge', 'TotalNumHs', 'ExplicitValence', 'ImplicitValence',
+    #               'NumExplicitHs', 'NumImplicitHs', 'Mass', 'NumPiElectrons',
+    #               'VdW_Radius', 'Sanderson_Electronegativity', 'Polarizability', 'Pauling_Electronegativity',
+    #               'GasteigerCharge', 'LogP_Value']
     
     return atom_feature_vector#, smi_feature_size
 
@@ -685,7 +771,7 @@ def get_multirelational_bond_matrix(smiles, bonds_list, weighted_flag=True, incl
 
     return torch.tensor(bond_matrix)
 
-class SMILEStoPyGGraphDataset(Dataset):
+class SMILEStoPyGGraphDataset(pyg_dataset):
     def __init__(self,
                  smi_list,
                  labels,
@@ -693,6 +779,8 @@ class SMILEStoPyGGraphDataset(Dataset):
                  hybridization_list,
                  chiraltypes,
                  bonds_list,
+                 mean=0,
+                 std=1,
                  features_list=['atom_properties', 'hybridization', 'aromaticity', 'ring', 'logP_values']):
         self.smi_list = smi_list
         self.labels = labels
@@ -701,9 +789,14 @@ class SMILEStoPyGGraphDataset(Dataset):
         self.chiraltypes = chiraltypes
         self.bonds_list = bonds_list
         self.features_list = features_list
+        self.mean=mean
+        self.std=std
 
     def __len__(self):
         return len(self.smi_list)
+    
+    def get_smiles(self, idx):
+        return self.smi_list[idx]
     
     def bond_features(self, bond):
         """Return bond feature vector."""
@@ -843,6 +936,7 @@ class SMILEStoPyGGraphDataset(Dataset):
     def __getitem__(self, idx):
         smiles = self.smi_list[idx]
         graph = self.mol_to_graph(smiles)
+        graph.x = (graph.x-self.mean)/self.std
         if graph is None:
             return None
         if self.labels is not None:
@@ -982,6 +1076,44 @@ class Multirelational_GraphDataset(Dataset):
         
         return atom_feature_vector, adjacency_tensor, degree_tensor
     
+    @staticmethod
+    def smiles2GcnDictData(
+                    smi,
+                    atom_symbols,
+                    hybridization_list,
+                    chiraltypes,
+                    bonds_list,
+                    max_num_atoms,
+                    bond_weight_flag=False,
+                    include_self_loop = True,
+                    *args, **kwargs
+                    ):
+        num_relations = len(bonds_list)
+        atom_feature_vector = get_atom_info_vector(smi,
+                                                    atom_symbols=atom_symbols,
+                                                    hybridization_list=hybridization_list,
+                                                    chiraltypes=chiraltypes,
+                                                    bonds_list=bonds_list
+                                                    )
+
+        adj_matrix_temp = get_multirelational_bond_matrix(
+                                                        smi,
+                                                        bonds_list,
+                                                        weighted_flag=bond_weight_flag,
+                                                        include_self_loop=include_self_loop
+                                                        )
+        adjacency_tensor = torch.zeros((num_relations, max_num_atoms, max_num_atoms))
+        adjacency_tensor[ :adj_matrix_temp.shape[0], :adj_matrix_temp.shape[1], :adj_matrix_temp.shape[2]] = adj_matrix_temp
+        degree_tensor = torch.stack([torch.diag(vector) for vector in adjacency_tensor.sum(axis=1)])
+        
+        return_vals = {'SMILES': smi,
+                       'atom_feature_vector': atom_feature_vector,
+                       'adjacency_matrix': adjacency_tensor.numpy(),
+                       'degree_matrix': degree_tensor.numpy(),
+                       }
+
+        return return_vals
+    
 class Multirelational_GraphDataset_Embeddings(Dataset):
     def __init__(self, smi_list, labels, max_num_atoms,
                          atom_symbols_embedding,
@@ -1108,7 +1240,7 @@ def limit_open_files(n=4096):
     new_soft = min(n, hard)
     resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, hard))  
          
-def SmilesDataset_graph_gen(split, dataset, out_path = 'SmilesDataset_graph', mean_std_flag = False, num_workers=int(cpu_count()/4), chunksize=1000, filetype='zip'):
+def SmilesDataset_graph_gen(split, dataset, out_path = 'SmilesDataset_graph', mean_std_flag = False, num_workers=4, chunksize=1000, filetype='zip'):
     
     # with Pool(num_workers) as pool:
     #     print('in pool loop:')
@@ -1140,6 +1272,12 @@ def SmilesDataset_graph_gen(split, dataset, out_path = 'SmilesDataset_graph', me
     if mean_std_flag:
         _, atom_feature_vector, _, _, _ = dataset[0]
         features_keys = list(atom_feature_vector.keys())
+        
+        ## Subsampling for large datasets to reduce required time
+        subset_size = min(50000, len(SmilesDataset_graph))
+        sampled_idxs = torch.randperm(len(SmilesDataset_graph))[:subset_size]
+        SmilesDataset_graph = [SmilesDataset_graph[i] for i in sampled_idxs]
+        
         mean_dict, std_dict = dict({}), dict({})
         for key in features_keys:
             temp = [data['atom_feature_vector'][key] for data in SmilesDataset_graph]
@@ -1172,10 +1310,6 @@ def smi2graphfeature(data,
         features = [atom_feature_vector[k] for k in features_list]
         mean = [dataset_mean[k] for k in features_list]
         std = [dataset_std[k] for k in features_list]
-        
-        # features = [v for k, v in atom_feature_vector.items() if k in features_list]
-        # mean = [v for k, v in dataset_mean.items() if k in features_list]
-        # std = [v for k, v in dataset_std.items() if k in features_list]
     except:
         raise AttributeError(f'Features should be in: {list(atom_feature_vector.keys())}')
     
@@ -1198,6 +1332,60 @@ def smi2graphfeature(data,
     y  = data['label']
     
     return feature_vector, adjacency_matrix, degree_matrix, y
+
+# def preprocessing_init(self, smiles):
+        
+#         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+#         mol_details = load_json(self.mol_details_path)
+#         max_num_atoms = mol_details['max_num_atoms']
+#         atom_symbols = mol_details['atom_symbols']
+#         hybridization_list = mol_details['hybridization_list']
+#         chiraltypes = mol_details['chiraltypes']
+#         bonds_list = mol_details['bonds_list']
+#         bond_weight_flag = False
+#         include_self_loop = True
+#         dataset_mean = load_from_pickle(self.mean_path)
+#         dataset_std = load_from_pickle(self.std_path)
+        
+#         atom_feature_vector = get_atom_info_vector(smiles,
+#                                                 atom_symbols=atom_symbols,
+#                                                 hybridization_list=hybridization_list,
+#                                                 chiraltypes=chiraltypes,
+#                                                 bonds_list=bonds_list
+#                                                 )
+#         adj_matrix_temp = get_multirelational_bond_matrix(smiles,
+#                                                         bonds_list,
+#                                                         weighted_flag=bond_weight_flag,
+#                                                         include_self_loop = include_self_loop
+#                                                         )
+#         adjacency_tensor = torch.zeros((len(bonds_list), max_num_atoms, max_num_atoms))
+#         adjacency_tensor[:adj_matrix_temp.shape[0], :adj_matrix_temp.shape[1], :adj_matrix_temp.shape[2]] = adj_matrix_temp # A = A + I
+#         degree_tensor = torch.stack([torch.diag(vector) for vector in adjacency_tensor.sum(axis=1)]) # D = D + I
+#         adjacency_tensor = adjacency_tensor.unsqueeze(0).to(device)
+#         degree_tensor = degree_tensor.unsqueeze(0).to(device)
+        
+#         features = [atom_feature_vector[k] for k in self.features_list]
+#         mean = [dataset_mean[k] for k in self.features_list]
+#         std = [dataset_std[k] for k in self.features_list]
+
+#         atom_feature_vector = np.concatenate(features, axis=1)
+#         atom_feature_vector = torch.from_numpy(atom_feature_vector)
+
+#         dataset_mean = np.concatenate(mean)
+#         dataset_std = np.concatenate(std)
+
+#         feature_vector = torch.zeros((max_num_atoms, atom_feature_vector.shape[-1]))
+#         feature_vector[:len(atom_feature_vector)] = (atom_feature_vector - dataset_mean)/dataset_std
+#         self.gcn_model, feature_vector= self.gcn_model.to(device), feature_vector.to(device)
+        
+#         with torch.no_grad(): 
+#             input_vector = self.gcn_model.get_features(feature_vector,
+#                                                 adjacency_tensor=adjacency_tensor,
+#                                                 degree_tensor=degree_tensor
+#                                                 )
+#             input_vector = input_vector.detach().cpu().numpy()
+        
+#         return input_vector
 
 class GraphData_from_pickle(Dataset):
     
@@ -1328,6 +1516,43 @@ class GraphData_from_pickle(Dataset):
         
         return atom_feature_vector
     
+    @staticmethod
+    def GcnDictData2GcnInput(data,
+                            dataset_mean,
+                            dataset_std,
+                            max_num_atoms,
+                            features_list=['symbol', 'atom_properties', 'hybridization', 'aromaticity', 'ring', 'chirality', 'neighbour_info'], #'3d_descriptors'
+                            padding=True
+                            ):
+        atom_feature_vector = data['atom_feature_vector']
+
+        try:
+            features = [atom_feature_vector[k] for k in features_list]
+            mean     = [dataset_mean[k] for k in features_list]
+            std      = [dataset_std[k] for k in features_list]
+        except KeyError:
+            raise AttributeError(f'Features should be in: {list(atom_feature_vector.keys())}')
+
+        try:
+            atom_feature_vector = np.concatenate(features, axis=1)
+        except Exception as e:
+            raise ValueError(f"Error found in: SMILES - {data.get('SMILES', 'UNKNOWN')}, "f"Features - {atom_feature_vector}") from e
+
+        atom_feature_vector = torch.from_numpy(atom_feature_vector).float()
+        dataset_mean = torch.from_numpy(np.concatenate(mean)).float()
+        dataset_std  = torch.from_numpy(np.concatenate(std)).float()
+
+        if padding:
+            feature_vector = torch.zeros((max_num_atoms, atom_feature_vector.shape[1]), dtype=torch.float32)
+            feature_vector[:atom_feature_vector.shape[0], :] = ((atom_feature_vector - dataset_mean) / dataset_std)
+        else:
+            feature_vector = (atom_feature_vector - dataset_mean) / dataset_std
+
+        adjacency_matrix = torch.from_numpy(data['adjacency_matrix']).float()
+        degree_matrix    = torch.from_numpy(data['degree_matrix']).float()
+
+        return feature_vector, adjacency_matrix, degree_matrix
+    
 class GraphData_from_pickle_3d_descriptor(Dataset):
     
     def __init__(self,
@@ -1368,6 +1593,7 @@ def feature_representation(dataset,
     '''
     
     # Determine the feature dimension from the model
+    model.eval()
     feature_dim = model.feature_dim
     num_samples = len(dataset)
 
@@ -1376,12 +1602,11 @@ def feature_representation(dataset,
     labels = np.zeros((num_samples))
     smi_list = [None]*num_samples
 
-    model.eval()
     with torch.no_grad():  
         for i, data in tqdm(enumerate(dataset), total=len(dataset), desc=f'Feature Extraction: '):
-            batch = {k: torch.tensor(v).to(device).unsqueeze(0) for k, v in zip(input_params, data)}
-            targets = batch.pop('labels').squeeze()
-            outputs = model(**batch)
+            inp_data = {k: torch.tensor(v).to(device).unsqueeze(0) for k, v in zip(input_params, data)}
+            targets = inp_data.pop('labels').squeeze()
+            outputs = model.get_features(**inp_data)
 
             # Convert outputs to CPU for NumPy compatibility
             outputs_np = outputs.cpu().numpy()
@@ -1410,10 +1635,9 @@ def gcn_pred_func(smi, gcn_model, rf_model, dataset_mean, dataset_std, features_
     adjacency_tensor[:adj_matrix_temp.shape[0], :adj_matrix_temp.shape[1], :adj_matrix_temp.shape[2]] += adj_matrix_temp
     degree_tensor = torch.stack([torch.diag(vector) for vector in adjacency_tensor.sum(axis=1)])
 
-
     #**************************************************************************************
     ## To get previous results comment this part
-    ## To change to use D^(-1/2)A_D^(-1/2) = D^(-1/2)A_1D^(-1/2) + D^(-1/2)A_2D^(-1/2)
+    ## To change to use D^(-1/2)AD^(-1/2) = D^(-1/2)A_1D^(-1/2) + D^(-1/2)A_2D^(-1/2)
     degree_tensor = degree_tensor - identity_tensor
     degree_tensor = degree_tensor.sum(axis=0)
     temp_idt = torch.zeros_like(degree_tensor)

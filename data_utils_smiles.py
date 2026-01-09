@@ -2,6 +2,7 @@ import re
 import io
 import os
 import ast
+import sys
 import math
 import copy
 import numpy as np
@@ -17,12 +18,14 @@ from sklearn.svm import SVC, SVR
 from sklearn.neighbors import KDTree, NearestNeighbors
 from multiprocessing import Pool, cpu_count
 from typing import Any, List, Dict, Tuple, Union, Set, Callable, Optional
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import traceback
 
 from rdkit import Chem, DataStructs
 from rdkit.Chem import Draw, rdDepictor, AllChem, rdMolDescriptors, Descriptors, Crippen
 from rdkit.Chem.Draw import rdMolDraw2D
-from rdkit.Chem.rdFingerprintGenerator import GetMorganGenerator, AdditionalOutput
 from mordred import Calculator, descriptors
+from rdkit.Chem.rdFingerprintGenerator import GetMorganGenerator, AdditionalOutput
 from rdkit.Chem.MolStandardize import rdMolStandardize
 
 import py3Dmol
@@ -30,9 +33,25 @@ from rdkit.Chem.Descriptors3D import (
     Asphericity, Eccentricity, InertialShapeFactor, NPR1, NPR2, PBF,
     PMI1, PMI2, PMI3, RadiusOfGyration, SpherocityIndex
 )
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from Generalised_data_utils import create_folder
 
 import torch
 import torch.nn as nn
+
+from rdkit import RDLogger
+RDLogger.DisableLog('rdApp.*')
+import warnings
+warnings.filterwarnings("ignore", module="mordred")
+
+# --- Precompute heavy objects once ---
+MORDRED_CALC = Calculator(descriptors, ignore_3D=True)
+MORGAN_GENERATOR = GetMorganGenerator(radius=2, fpSize=1024)
+RDKit_FUNCS = [
+    (name, func)
+    for name, func in Descriptors.__dict__.items()
+    if callable(func)
+]
 
 __all__ = [  
     'canonicalize_smiles',
@@ -65,7 +84,7 @@ __all__ = [
     
     'calculate_properties',
     'compute_all_3d_descriptors',
-    'create_descriptor_functions',
+    'get_descriptor_functions_from_name',
     'process_in_parallel',
     'compute_descriptors',
     'compute_descriptors_from_name',
@@ -73,6 +92,11 @@ __all__ = [
     'load_or_compute_descriptors',
     'mol_to_fetures',
     'mol_to_fetures_with_descriptor_function',
+    'MORDRED_CALC',
+    'MORGAN_GENERATOR',
+    'RDKit_FUNCS',
+    'mol_to_features_batch',
+    'mol_to_features_single',
     
     'calculate_similarities_distances',
     'calculate_similarity_distance',
@@ -327,10 +351,18 @@ def mol_to_image_with_font(mol, size=(400, 400), atom_font_size=18, bond_line_wi
 def fig_to_image(fig, dpi=100):
     import io
     from PIL import Image
+
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
     buf.seek(0)
+
     img = Image.open(buf)
+
+    # --- SAFETY FIX ---
+    # Ensure all metadata values are strings
+    if hasattr(img, "info") and isinstance(img.info, dict):
+        img.info = {k: str(v) for k, v in img.info.items()}
+
     return img
 
 def plot_smiles_grid(smiles_list: List[str],
@@ -338,16 +370,17 @@ def plot_smiles_grid(smiles_list: List[str],
                      titles: List[str]=None,
                      cols: int = 8,
                      image_size: Tuple[int,int] = (400, 400),
-                     figsize: Tuple[int,int] = (24, 12),
-                     legendfontsize: int = 12,
+                     figsize: Tuple[int,int] = None,
                      savepath: str = '',
                      suptitle: str = '',
                      caption: str = '',
+                     legendfontsize: int = 0,
                      row_lines: bool = True,
                      atom_font_size: int = 18,
                      dots_per_angstrom: float = None,
                      bond_line_width: float = 4,
-                     show=False
+                     separate_first_column: bool = False,
+                     show=True
                      ) -> None:
     """
     Create a grid plot of molecules from SMILES strings.
@@ -362,6 +395,12 @@ def plot_smiles_grid(smiles_list: List[str],
         suptitle (str): Title for the entire figure.
         caption (str): Caption for the entire figure.
     """
+    if figsize is None:
+        n_row = (len(smiles_list)//cols)+1
+        figsize=(3.3*cols, 4 * n_row)
+    if legendfontsize == 0:
+        legendfontsize = figsize[0]-int(figsize[0]/cols)-1
+        
     titlefontsize = legendfontsize + 2
     num_molecules = len(smiles_list)
     rows = math.ceil(num_molecules / cols)
@@ -390,7 +429,7 @@ def plot_smiles_grid(smiles_list: List[str],
                             ha="center", va="center", transform=ax.transAxes)
             else:
                 ax.text(0.5, 0.5, 'Invalid SMILES',
-                        ha='center', va='center', fontsize=12)
+                        ha='center', va='center', fontsize=legendfontsize)
         ax.axis('off')
 
     # Hide unused axes
@@ -398,22 +437,52 @@ def plot_smiles_grid(smiles_list: List[str],
         axs[j].axis('off')
 
     if suptitle:
-        plt.suptitle(suptitle, fontsize=20, fontweight='bold')
+        plt.suptitle(suptitle, fontsize=titlefontsize+2*int(figsize[0]/cols), fontweight='bold')
 
     if caption:
-        plt.figtext(0.5, -0.02, caption, wrap=True, ha="center", fontsize=12)
+        plt.figtext(0.5, -0.02, caption, wrap=True, ha="center", fontsize=legendfontsize)
 
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    # plt.tight_layout(rect=[0, 0, 1, 0.95])
+    plt.tight_layout()
+    # Compute global left/right bounds from all axes
+    left = min(ax.get_position().x0 for ax in axs)
+    right = max(ax.get_position().x1 for ax in axs)
+
     if row_lines and rows > 1:
-        for r in range(rows):
-            y = 0.95 - ((r / rows) * 0.95)
-            fig.add_artist(plt.Line2D([0.02, 0.98], [y, y], color="black", lw=1, alpha=0.5, transform=fig.transFigure))
+        for r in range(rows - 1):
+            # Axes in the current row
+            row_axes = axs[r * cols:(r + 1) * cols]
+
+            # Bottom of the row (minimum y0 among axes in that row)
+            y_bottom = min(ax.get_position().y0 for ax in row_axes)
+
+            # Small adaptive offset based on row height
+            row_height = max(ax.get_position().height for ax in row_axes)
+            y = y_bottom - 0.25 * row_height
+
+            fig.add_artist(plt.Line2D([left, right], [y, y], transform=fig.transFigure, color="black", lw=1, alpha=0.5))
+            
+    if cols > 1 and separate_first_column:
+        # right edge of the first column
+        x = axs[0].get_position().x1
+
+        # vertical span: from bottom row to top row
+        y_bottom = axs[(rows - 1) * cols].get_position().y0
+        y_top = axs[0].get_position().y1
+
+        fig.add_artist(plt.Line2D([x, x], [y_bottom, y_top], transform=fig.transFigure, color="black", lw=1, alpha=0.5))
 
     if savepath:
+        path = savepath.split('/')[:-1]
+        print(path)
+        path = '/'.join(path)
+        print(path)
+        create_folder(path)
         plt.savefig(savepath, dpi=300, bbox_inches='tight')
+        print(f'Figure saved in: {savepath}')
         plt.close()
     elif not show:
-        return fig_to_image(fig, dpi=800)
+        return fig_to_image(fig, dpi=300)
     else:
         plt.show()
         
@@ -1045,7 +1114,7 @@ _mordred_calc = None
 
 
 # --- Descriptor Setup ---
-def create_descriptor_functions(descriptor_names: List[str]) -> Tuple[List[Callable], Calculator]:
+def get_descriptor_functions_from_name(descriptor_names: List[str]) -> Tuple[List[Callable], Calculator]:
     """Creates RDKit and Mordred descriptor function sets."""
     RDKit_descriptor_funcs = OrderedDict({
         k: v for k, v in Descriptors.__dict__.items()
@@ -1065,7 +1134,7 @@ def compute_descriptors_from_name(smiles: str,
                         ) -> Dict[str, float] | None:
     """Computes descriptors for a single SMILES string."""
     try:
-        RDKit_descriptor_funcs, mordred_calc = create_descriptor_functions(descriptor_names)
+        RDKit_descriptor_funcs, mordred_calc = get_descriptor_functions_from_name(descriptor_names)
         mol = Chem.MolFromSmiles(smiles)
         if mol is None:
             print(f'Invalid SMILES Error...')
@@ -1165,7 +1234,7 @@ def listsmiles2propdf(smiles_list: List[str],
     """Takes list of SMILES and outputs descriptor DataFrame (optionally saves to CSV)."""
     
     print("Preparing descriptor functions...")
-    rdkit_funcs, mordred_calc = create_descriptor_functions(descriptor_names)
+    rdkit_funcs, mordred_calc = get_descriptor_functions_from_name(descriptor_names)
 
     n_jobs = int(mp.cpu_count()/2) - 1
     chunk_size = min(10, len(smiles_list) // (10 * n_jobs))
@@ -1310,12 +1379,85 @@ def mol_to_fetures(smile: str) -> Dict[Any | str, Any]:
     return all_descriptors
 
 
+def mol_to_features_single(smiles: str|Chem.Mol,
+                           compute_3d: bool = True
+                           ) -> Dict[str, Any]:
+    """Compute descriptors for a single RDKit Mol (fast path)."""
+    features = {'smiles':smiles}
+
+    if isinstance(smiles, str):
+        mol = Chem.MolFromSmiles(smiles)
+    else:
+        mol=smiles
+
+    # --- RDKit built-in descriptors ---
+    for name, func in RDKit_FUNCS:
+        try:
+            features[name] = func(mol)
+        except:
+            pass
+        
+    # --- Mordred descriptors ---
+    try:
+        desc_values = MORDRED_CALC(mol)
+        features.update({str(k): v for k, v in desc_values.items()})
+    except:
+        pass
+    
+    # --- Morgan fingerprint ---
+    try:
+        fp = MORGAN_GENERATOR.GetFingerprint(mol)
+        features.update({f"MorganFP_{i}": int(bit) for i, bit in enumerate(fp)})
+    except:
+        pass
+
+    # --- Optional 3D descriptors ---
+    if compute_3d:
+        try:
+            features.update(compute_all_3d_descriptors(Chem.MolToSmiles(mol)))
+        except:
+            pass
+            
+    return features
+
+
+def mol_to_features_batch(smiles_list: List[str],
+                          smiles_column_name='smiles',
+                          compute_3d: bool = True,
+                          verbose: bool = True
+                          ) -> List[Tuple[str, Dict[str, Any]]]:
+    """
+    Optimized batch descriptor computation for a list of SMILES.
+    Reuses global calculator and avoids redundant initialization.
+    """
+    results = []
+
+    for i, smi in tqdm(enumerate(smiles_list), desc='Calculating descriptors:', total=len(smiles_list)):
+        try:
+            descs = mol_to_features_single(smi, compute_3d=compute_3d)
+            results.append(descs)
+        except:
+            pass
+
+        if verbose and (i + 1) % 100 == 0:
+            print(f"[{i + 1}/{len(smiles_list)}] processed")
+    df = pd.DataFrame(results)
+    df=df.rename(columns={'smiles':smiles_column_name})
+    num_df = df.select_dtypes(include=['number'])
+    final_df = pd.concat([df[smiles_column_name], num_df], axis=1)
+    
+    return final_df
+
 def safe_divide(numerator, denominator):
     return numerator / denominator if denominator != 0 else float('inf')
 
 def get_fingerprint(mol, name: str):
     
     name = name.strip().lower()
+    
+    if isinstance(mol, str):
+        mol = Chem.MolfromSmiles(mol)
+        
     if name == 'rdkit':
         return Chem.RDKFingerprint(mol)
     elif name == 'pattern':
@@ -1340,6 +1482,13 @@ def fingerprint_to_array(fp) -> np.ndarray:
 
 def calculate_fingerprint_from_mol(mol: str, fingerprint_name: str) -> np.ndarray:
     
+    if isinstance(mol, str):
+        mol = Chem.MolfromSmiles(mol)
+    elif isinstance(mol, Chem.Mol):
+        pass
+    else:
+        raise AttributeError(f'Invalid input ({mol}) of type {type(mol)}')
+        
     if mol is None:
         raise ValueError("Invalid SMILES string")
     fp = get_fingerprint(mol, fingerprint_name)
@@ -1375,8 +1524,8 @@ def calculate_multiple_fingerprints_all(smiles_list:List[str],
                                         ) -> pd.DataFrame:
     
     all_results = [None]*len(smiles_list)
-    for i, smiles in enumerate(smiles_list):
-        all_results[i].append(calculate_multiple_fingerprints_from_smiles(smiles, fingerprint_names))
+    for i, smiles in tqdm(enumerate(smiles_list), desc='Calculating FPs', total=len(smiles_list)):
+        all_results[i] = calculate_multiple_fingerprints_from_smiles(smiles, fingerprint_names)
     
     return all_results
 

@@ -4,13 +4,15 @@ from typing import Union, Tuple, Dict, List, Any
 import os, sys, pickle, copy, re, warnings
 import numpy as np
 import pandas as pd
-import math
+import math, time
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 from sklearn import metrics
 from collections import OrderedDict
 import seaborn as sns
 from sklearn.metrics import root_mean_squared_error, mean_absolute_error, r2_score
+import matplotlib
+matplotlib.use("Agg")
 
 import torch, platform
 import tarfile
@@ -269,7 +271,8 @@ class Trainer_functions:
                         criterion: nn.Module,
                         targets_col: str = 'labels',
                         description: str = 'Map',
-                        device: str=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+                        device: str=torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
+                        verbose:bool=False
                         ) -> Tuple[np.ndarray[float], np.ndarray[float], float]:
         
         """
@@ -295,14 +298,25 @@ class Trainer_functions:
         y_true = []
         epoch_test_loss = 0
         model_params = get_func_input_names(model.forward)
-
+        
+        progress_bar=test_loader
+        if verbose:
+            progress_bar = tqdm(test_loader, desc=description)
+            
         with torch.no_grad():  # No need to compute gradients during evaluation
-            for batch in tqdm(test_loader, desc=description):
+            for batch in progress_bar:
                 targets = batch.pop(targets_col).to(device)
-                batch = {k: batch[k].to(device) for k in model_params}
+                try:
+                    batch = {k: batch[k].to(device) for k in model_params if (k in batch.keys()) and (batch[k] is not None)}
+                except:
+                    batch = {k: [temp_v.to(device) for temp_v in batch[k] if temp_v is not None] for k in model_params if k in batch.keys()}
+                
                 # batch = {k: v.to(device) for k, v in batch.items()}
                 # targets = batch.pop(targets_col)
                 outputs = model(**batch)
+                # print(outputs.shape)
+                # print(targets.shape)
+                # print('-')
                 loss = criterion(input=outputs.reshape(targets.shape).type(torch.float32), target=targets.type(torch.float32)).type(torch.float32)
                     
                 # Collect all predictions and targets
@@ -326,7 +340,8 @@ class Trainer_functions:
                 criterion: nn.Module,
                 targets_col: str = 'labels',
                 description: str = 'Test',
-                device: str=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+                device: str=torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
+                verbose=True
                 ) -> Tuple[Dict[str, float], float]:
         
         """
@@ -350,7 +365,8 @@ class Trainer_functions:
                                                                 criterion=criterion,
                                                                 targets_col=targets_col,
                                                                 description = description,
-                                                                device=device
+                                                                device=device,
+                                                                verbose=verbose
                                                                 )
         results = regression_test_metrics(y_true=y_true, y_pred=y_pred)
             
@@ -364,7 +380,8 @@ class Trainer_functions:
                 criterion: nn.Module,
                 targets_col: str = 'labels',
                 description: str = 'Train-Test',
-                device: str=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+                device: str=torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
+                verbose=True
                 ) -> Tuple[float, float]:
         
         """
@@ -387,9 +404,23 @@ class Trainer_functions:
                                                                 criterion=criterion,
                                                                 targets_col=targets_col,
                                                                 description=description,
-                                                                device=device
+                                                                device=device,
+                                                                verbose=verbose
                                                                 )
+        # y_true_np = np.asarray(y_true)
+        # y_pred_np = np.asarray(y_pred)
+        
+        # print("NaN in y_true:", np.isnan(y_true_np).sum())
+        # print("NaN in y_pred:", np.isnan(y_pred_np).sum())
 
+        # print("Inf in y_true:", np.isinf(y_true_np).sum())
+        # print("Inf in y_pred:", np.isinf(y_pred_np).sum())
+
+        # if np.isnan(y_pred_np).any():
+        #     idx = np.where(np.isnan(y_pred_np))[0][:5]
+        #     print("Sample y_pred NaNs at indices:", idx)
+        #     print("Corresponding y_true:", y_true_np[idx])
+            
         # Calculate metrics
         r2 = r2_score(y_true=y_true, y_pred=y_pred)
         
@@ -402,11 +433,12 @@ class Trainer_functions:
                     criterion: nn.Module,
                     optimizer: torch.optim.Optimizer,
                     param_reg: str = '',
-                    lambda_reg: float = 0.1,
+                    lambda_reg: float = 1e-4,
                     alpha: float = 0.5,
                     targets_col: str = 'labels',
                     description: str = 'Training',
-                    device: str=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+                    device: str=torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
+                    verbose:bool = False
                     ) -> float:
             
         """
@@ -432,11 +464,19 @@ class Trainer_functions:
         epoch_train_loss = 0
         model_params = get_func_input_names(model.forward)
         # with torch.autograd.set_detect_anomaly(True):
-        for i, batch in tqdm(enumerate(train_loader), total=len(train_loader), desc=description):
+        
+        progress_bar = enumerate(train_loader)
+        if verbose:
+            progress_bar = tqdm(enumerate(train_loader), total=len(train_loader), desc=description)
+        
+        for i, batch in progress_bar:
             # print(f'Train Batch: {i}\n')
             # batch = {k: v.to(device) for k, v in batch.items() if k in model_params}
             targets = batch.pop(targets_col).to(device)
-            batch = {k: batch[k].to(device) for k in model_params}
+            try:
+                batch = {k: batch[k].to(device) for k in model_params if (k in batch.keys()) and (batch[k] is not None)}
+            except:
+                batch = {k: [temp_v.to(device) for temp_v in batch[k] if temp_v is not None] for k in model_params if k in batch.keys()}
             optimizer.zero_grad()
             outputs = model(**batch)
                 
@@ -479,6 +519,7 @@ class Trainer_functions:
                     test_loader: DataLoader[Dict[str, torch.Tensor]],
                     criterion: nn.Module,
                     optimizer: torch.optim.Optimizer,
+                    param_reg: str = '',
                     targets_col: str = 'labels',
                     scheduler_name: str = '',
                     schedulers_kwargs: dict = {},
@@ -496,17 +537,18 @@ class Trainer_functions:
                     loss_save_filename: str = 'loss_acc_file',
                     best_model_savename: str = 'best_model',
                     description_savename: str = 'description.txt',
-                    tqdm_write: bool = False,
+                    # tqdm_write: bool = False,
                     standardscaler: Any = None,
                     save_model_wrt: str = 'loss', # 'loss' or 'accuracy'
                     more_description = '',
                     save_model_per_epoch: int = 50,
                     DATETIME: str = datetime_now(path=False)[0],
                     date: str = datetime_now(path=False)[1],
-                    time: str = datetime_now(path=False)[2],
+                    TIME: str = datetime_now(path=False)[2],
                     save_model: bool = True,
                     device: Any = torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
-                    collate_fn = None
+                    collate_fn = None,
+                    verbose: bool = True
                     ) -> tuple[List[float], nn.Module]:
         
         """
@@ -521,9 +563,10 @@ class Trainer_functions:
             val_loader (DataLoader): Dataloader containing validation data.
             test_loader (DataLoader): Dataloader containing test data.
             criterion (nn.Module): Loss function to optimize.
+            param_reg (str): Type of regularization ('l1', 'l2', 'elastic_net', or '').
             optimizer (torch.optim.Optimizer): Optimizer for model training.
             targets_col (str, optional): Key for the target values in batch dictionary. Defaults to 'labels'.
-            scheduler_name (str, optional): Name of the learning rate scheduler (if any). Defaults to ''.
+            scheduler_name (str, optional): Name of the learning rate scheduler (should be in ['steplr', 'multisteplr', 'exponentiallr', 'reducelronplateau', 'cycliclr', 'onecyclelr']). Defaults to ''.
             schedulers_kwargs (dict, optional): Keyword arguments for the scheduler. Defaults to {}.
             early_stop (bool, optional): Whether to apply early stopping. Defaults to False.
             early_stop_kwargs (dict, optional): Arguments for early stopping strategy. Defaults to {}.
@@ -556,7 +599,7 @@ class Trainer_functions:
         """
         
         if not results_savepath:
-            results_savepath = f"./cache/{date}/{time}"
+            results_savepath = f"./cache/{date}/{TIME}"
         models_savepath = create_folder(f"{results_savepath}/models")
         best_model_savepath = f"{models_savepath}/{best_model_savename}"
         
@@ -653,27 +696,35 @@ class Trainer_functions:
         progress_bar = tqdm(range(num_epochs), desc="Training", unit="Eps")
 
         for epoch in progress_bar:
-            # tqdm.write(f"Epoch - {epoch + 1}/{num_epochs}:")
+            if verbose:
+                tqdm.write(f"-"*80)
+                tqdm.write(f"Epoch - {epoch + 1}/{num_epochs}:")
             model.train()
+            # init = time.time()
             epoch_train_loss = Trainer_functions.train_1epoch(model,
                                             train_loader,
                                             criterion,
                                             optimizer,
                                             device=device,
+                                            param_reg=param_reg,
                                             targets_col=targets_col,
                                             description = 'Training',
+                                            verbose=verbose
                                             )
             train_acc, epoch_train_loss = Trainer_functions.train_test_model(model=model, test_loader=train_loader_subset,
-                                                        criterion=criterion, device=device, targets_col=targets_col, description='Test-on-Train')
+                                                        criterion=criterion, device=device, targets_col=targets_col,
+                                                        description='Test-on-Train', verbose=verbose)
             test_acc, epoch_test_loss = Trainer_functions.train_test_model(model=model, test_loader=test_loader_subset,
-                                                        criterion=criterion, device=device, targets_col=targets_col, description='Test-on-Test')
+                                                        criterion=criterion, device=device, targets_col=targets_col,
+                                                        description='Test-on-Test', verbose=verbose)
             val_acc, epoch_val_loss = Trainer_functions.train_test_model(model=model, test_loader=val_loader_subset,
-                                                    criterion=criterion, device=device, targets_col=targets_col, description='Test-on-Val')
-
+                                                        criterion=criterion, device=device, targets_col=targets_col,
+                                                        description='Test-on-Val', verbose=verbose)
+            # print(f'Req time: {time.time() - init}')
             # train_acc, test_acc, val_acc = train_acc, test_acc, val_acc
-            train_acc_list[epoch] = round(train_acc, 2)
-            test_acc_list[epoch] = round(test_acc, 2)
-            val_acc_list[epoch] = round(val_acc, 2)
+            train_acc_list[epoch] = round(train_acc, 4)
+            test_acc_list[epoch] = round(test_acc, 4)
+            val_acc_list[epoch] = round(val_acc, 4)
             lr_list[epoch] = optimizer.param_groups[0]['lr']
             time_list[epoch] = datetime_now(path=False)[0]
             
@@ -689,9 +740,10 @@ class Trainer_functions:
                 raise NameError('Condition name not known')
 
             if condition_flag:
+                if verbose:
+                        print(f"\033[31m### Best model -> | Epoch: {epoch + 1} | Val loss: {epoch_val_loss:.4f} | Val accuracy: {val_acc:.4f} | \033[0m")
                 if save_model:
                     # Save the best model
-                    print(f"Saving best model at epoch {epoch + 1} with validation loss: {epoch_val_loss:.4f} and accuracy: {val_acc:.4f}")
                     Trainer_functions.save_network(model=model, 
                                 optimizer=optimizer,
                                 epoch=epoch,
@@ -733,7 +785,8 @@ class Trainer_functions:
                 
                 model_save_name = f"{models_savepath}/model_at_epoch_{epoch}"
                 if save_model:
-                    print(f"Saving model at epoch {epoch + 1} to: {model_save_name}")
+                    if verbose:
+                        print(f"Saving model at epoch {epoch + 1} to: {model_save_name}")
                     Trainer_functions.save_network(model=model, 
                                                 optimizer=optimizer,
                                                 epoch=epoch,
@@ -751,14 +804,15 @@ class Trainer_functions:
                                                 network_save_filename=model_save_name)
             
             # Update tqdm progress bar with accs
-            if tqdm_write:
+            if verbose:
                 tqdm.write(f"At {time_list[epoch]} |Epoch {epoch+1}/{num_epochs} - "
                         f"Train Loss: {epoch_train_loss:.4f} | Val Loss: {epoch_val_loss:.4f} | Test Loss: {epoch_test_loss:.4f} | "
                         f"Train Acc: {train_acc:.2f} | Val Acc: {val_acc:.2f} | Test Acc: {test_acc:.2f}")
             
-            # Set postfix in tqdm bar for live update
-            progress_bar.set_postfix({"Train Loss": f"{epoch_train_loss:.4f}", "Val Loss": f"{epoch_val_loss:.4f}", "Test Loss": f"{epoch_test_loss:.4f}",
-                                    "Train Acc": f"{train_acc:.4f}", "Val Acc": f"{val_acc:.4f}", "Test Acc": f"{test_acc:.4f}"})
+            # # Set postfix in tqdm bar for live update
+            if not verbose:
+                progress_bar.set_postfix({'Epoch':f"{epoch+1}/{num_epochs}", "Train Loss": f"{epoch_train_loss:.4f}", "Val Loss": f"{epoch_val_loss:.4f}",
+                                          "Test Loss": f"{epoch_test_loss:.4f}", "Train Acc": f"{train_acc:.4f}", "Val Acc": f"{val_acc:.4f}", "Test Acc": f"{test_acc:.4f}"})
                 
             if scheduler:
                 if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
@@ -788,7 +842,6 @@ class Trainer_functions:
                                                 title = title,
                                                 save_image_filename = f"{results_savepath}/{save_image_filename}"
                                                )
-                
 
         print('Training completed.')
         
@@ -844,7 +897,6 @@ class Trainer_functions:
         # Create subplots
         fig, axs = plt.subplots(1, 2, figsize=(16, 8))  # 1 row, 2 columns
         fig.suptitle(title, fontsize=title_fontsize)  # Overall title for the subplots
-        
         # Plot for accuracy
         axs[0].plot(
             range(len(train_acc)), train_acc, 
@@ -852,7 +904,8 @@ class Trainer_functions:
             markersize=markersize, 
             linewidth=linewidth, 
             linestyle=linestyle, 
-            label='train' 
+            label='train',
+            color='green'  
         )
         axs[0].plot(
             range(len(test_acc)), test_acc, 
@@ -860,7 +913,8 @@ class Trainer_functions:
             markersize=markersize, 
             linewidth=linewidth, 
             linestyle=linestyle, 
-            label='test' 
+            label='test',
+            color='red'  
         )
         axs[0].plot(
             range(len(val_acc)), val_acc, 
@@ -868,7 +922,8 @@ class Trainer_functions:
             markersize=markersize, 
             linewidth=linewidth, 
             linestyle=linestyle, 
-            label='val' 
+            label='val',
+            color='blue'  
         )
         axs[0].set_xlabel(xlabel, fontsize=title_fontsize-5)
         axs[0].set_ylabel(ylabel_acc, fontsize=title_fontsize-5)
@@ -918,6 +973,7 @@ class Trainer_functions:
         # Save the plot if a filename is provided
         if save_image_filename:
             plt.savefig(f"{save_image_filename}.png", bbox_inches='tight')  # Save as PNG
+            print(f'\033[1;35mSaved loss accuracy plot for Train-Test-Val data: "{f"{save_image_filename}.png"}"\033[0m')
         
         # plt.show()  # Display the plot
         plt.close()  # Close the figure
@@ -962,7 +1018,12 @@ class Trainer_functions:
             None. Saves a `.pt` checkpoint file to disk.
         """
         network_save_filename = ''.join([network_save_filename, '.pt'])
-        print(f'Saving network in: "{network_save_filename}')
+        # Simple Red
+        # print(f'\033[31m Saving network in: "{network_save_filename}" \033[0m')
+        # #Bold Magenta
+        # print(f'\033[1;35mSaving network in: "{network_save_filename}"\033[0m')
+        # #Bold Violet
+        print(f'\033[1;95mSaving network in: "{network_save_filename}"\033[0m')
         
         source_file = os.path.abspath(__file__)
         with open(source_file, 'rb') as fp:
@@ -1022,6 +1083,7 @@ class Trainer_functions:
 
         df = pd.DataFrame(data_dict)
         df.to_csv(save_csv_filename, index=False)
+        # print(f'\033[1;35mSaved calculated metrics in: "{save_csv_filename}"\033[0m')
         
         return df
 
@@ -1029,10 +1091,11 @@ class Trainer_functions:
     # pre-trained network load function for test
     @staticmethod
     def load_test_network(network: nn.Module,
-                        optimizer: torch.optim.Optimizer,
+                        # optimizer: torch.optim.Optimizer,
                         temp_network_path: str = '',
                         strict: bool = True,
-                        device: str = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+                        device: str = torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
+                        verbose:bool = True
                         ):
         """
         Loads a previously saved model checkpoint for evaluation or resumption.
@@ -1044,13 +1107,14 @@ class Trainer_functions:
             device (str): Device to map the checkpoint onto (e.g., 'cuda' or 'cpu').
 
         Returns:
-            None. Loads model/optimizer states and prints training summary.
+            [model_repr, standardscaler, checkpoint, network_pyfile]
             Prints error if checkpoint is missing or corrupted.
         """
         
         if os.path.isfile(temp_network_path):
-            print('-'*80)
-            print('Loading pre-trained network checkpoint from: "{}"'.format(temp_network_path))
+            if verbose:
+                print('-'*80)
+                print('Loading pre-trained network checkpoint from: "{}"'.format(temp_network_path))
             checkpoint = torch.load(temp_network_path, map_location=device, weights_only=False)
             #--------------------------------------------------
             epoch_best_network = checkpoint.get('epoch', 'UNKNOWN')
@@ -1068,13 +1132,13 @@ class Trainer_functions:
             #+++++++++++++++++++++++++++++++++++++++++++++++++++
                 
             network.load_state_dict(checkpoint['state_dict'], strict=strict)
+            if verbose:
+                print('Loaded pre-trained network checkpoint from "{}"\nepoch: {} train loss: {} val loss: {} test loss: {} train acc: {} val acc: {} test acc: {} ' \
+                    .format(temp_network_path, epoch_best_network, train_loss[-1], val_loss[-1], test_loss[-1], train_acc[-1], val_acc[-1], test_acc[-1])
+                        )
+                print('='*80)
             
-            print('Loaded pre-trained network checkpoint from "{}"\nepoch: {} train loss: {} val loss: {} test loss: {} train acc: {} val acc: {} test acc: {} ' \
-                .format(temp_network_path, epoch_best_network, train_loss[-1], val_loss[-1], test_loss[-1], train_acc[-1], val_acc[-1], test_acc[-1])
-                    )
-            print('='*80)
-            
-            return model_repr, standardscaler, model_class, network_pyfile
+            return model_repr, standardscaler, checkpoint, network_pyfile
         else:
             print('-'*80)
             print(f'No pre-trained network checkpoint found at "{temp_network_path}"')
@@ -2029,7 +2093,7 @@ class TransferWeights:
             
             missings = {'missing_keys':missing_keys, 'unexpected_keys':unexpected_keys}
             
-        return missings
+            return missings
 
     def transfer_into(self, model: nn.Module, strict: bool = False) -> nn.Module:
         """
