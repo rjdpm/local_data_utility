@@ -68,16 +68,30 @@ class AtomicDescriptorCalculator:
     BASIC_PATTERNS  = [Chem.MolFromSmarts(p) for p in BASIC_SMARTS]
     MASKING_VALUE = -999999.0
     
-    def __init__(self, smi, get_3d=False):
+    def __init__(self,
+                 smi,
+                 hybridization_list=['UNSPECIFIED', 'S', 'SP', 'SP2', 'SP3', 'SP2D', 'SP3D', 'SP3D2', 'OTHER'],
+                 chiraltypes=['CHI_UNSPECIFIED', 'CHI_TETRAHEDRAL_CW', 'CHI_TETRAHEDRAL_CCW'],
+                 bonds_list = ["SINGLE", "DOUBLE", "TRIPLE", "AROMATIC"],
+                 get_3d=False,
+                 AddHs = False,
+                 ):
         
         if isinstance(smi, str):
             self.mol = Chem.MolFromSmiles(smi)
-            # self.smi = smi
+            self.smi = smi
         else:
             self.mol=smi
-            # self.smi = Chem.MolToSmiles(smi)
+            self.smi = Chem.MolToSmiles(smi)
+            
+        self.hybridization_list = hybridization_list
+        self.chiraltypes = chiraltypes
+        self.bonds_list = bonds_list
+            
         self.graph = self.mol_to_nx(self.mol)
-        # self.mol = Chem.AddHs(self.mol)
+        if AddHs:
+            self.mol = Chem.AddHs(self.mol)
+            
         if self.mol is None:
             raise ValueError(f"Invalid SMILES string: {smi}")
         Chem.AssignStereochemistry(self.mol, force=True, cleanIt=True)
@@ -93,7 +107,7 @@ class AtomicDescriptorCalculator:
         self.logp_mr_contrib()
         self.estate_indices()
         
-        self.df = pd.read_csv('/home/rkmvu/Dataset/Atom_properties_webelements.csv')
+        self.df = pd.read_csv('/home/rkmvu/Dataset/molecule_data_details/Atom_properties_webelements.csv')
         self.df = self.df.to_dict()
         self.df['Atom'] = {v:k for k, v in self.df['Atom'].items()}
             
@@ -236,6 +250,7 @@ class AtomicDescriptorCalculator:
             atom_properties['Etlp_f'][i] = float(df['Enthalpy fusion (kJ/mol)'][df['Atom'][symbol]])
             atom_properties['Etlp_v'][i] = float(df['Enthalpy vapour (kJ/mol)'][df['Atom'][symbol]])
             atom_properties['Etlp_a'][i] = float(df['Enthalpy atomisation (kJ/mol)'][df['Atom'][symbol]])
+            
             atom_properties['is_inring'][i] = atom.IsInRing()
             atom_properties['is_aromatic'][i] = atom.GetIsAromatic()
             atom_properties['nring_mmbr'][i] = [atom.IsInRingSize(i) for i in range(3,9)]
@@ -410,12 +425,11 @@ class AtomicDescriptorCalculator:
         
     def get_hybridization(self, hybridization_tag):
         
-        hyb_list = ['UNSPECIFIED', 'S', 'SP', 'SP2', 'SP3', 'SP2D', 'SP3D', 'SP3D2', 'OTHER']
         tag = str(hybridization_tag)
         if tag == 'UNSPECIFIED':
-            v = list_to_onehot(str(hybridization_tag), hyb_list, val=self.MASKING_VALUE)
+            v = list_to_onehot(str(hybridization_tag), self.hybridization_list, val=self.MASKING_VALUE)
         else:
-            v = list_to_onehot(str(hybridization_tag), hyb_list)
+            v = list_to_onehot(str(hybridization_tag), self.hybridization_list)
         
         return np.array(v, dtype=np.bool_)
     

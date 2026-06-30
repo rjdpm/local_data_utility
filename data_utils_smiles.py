@@ -8,6 +8,7 @@ import copy
 import numpy as np
 import pandas as pd
 from PIL import Image
+from io import BytesIO
 from tqdm import tqdm
 import multiprocessing as mp
 import matplotlib.pyplot as plt
@@ -20,6 +21,7 @@ from multiprocessing import Pool, cpu_count
 from typing import Any, List, Dict, Tuple, Union, Set, Callable, Optional
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import traceback
+from rdkit.Chem.Scaffolds import MurckoScaffold
 
 from rdkit import Chem, DataStructs
 from rdkit.Chem import Draw, rdDepictor, AllChem, rdMolDescriptors, Descriptors, Crippen
@@ -66,10 +68,11 @@ __all__ = [
     'augment_smiles_with_labels',
     'smiles_validity_check',
     'atom_filter_smiles',
+    'generate_scaffold',
     
-    'draw_molecule',
+    'plot_molecule',
     'plot_smiles_grid',
-    'draw_mol_grid_with_legends',
+    'plot_mol_grid_with_legends',
     'plot_3d_molecule_with_labels',
     'smiles2morganbifinfo',
     'on_morganbits',
@@ -124,7 +127,7 @@ __all__ = [
            
             
 def canonicalize_smiles(smiles: str,
-                        isomericSmiles: bool = True
+                        isomericSmiles: bool = False,#True
                         ) -> (str | None):
     
     '''
@@ -291,22 +294,293 @@ def augment_smiles_with_labels(smiles_list: List[str],
 
     return augmented_smiles, np.array(augmented_labels)
 
-
-def draw_molecule(smiles: str,
-                  add_hydrogen: bool = False,
-                  size: Tuple[int] = (600, 400),
-                  highlight_idx: List[int] = [],
-                  savepath: str = ''
-                  ) -> Image.Image:
-    
+def generate_scaffold(smiles, include_chirality=False):
+    """
+    Generate Bemis-Murcko scaffold for a SMILES string.
+    Returns None if molecule parsing fails.
+    """
     mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return None
+    
+    scaffold = MurckoScaffold.MurckoScaffoldSmiles(
+        mol=mol,
+        includeChirality=include_chirality
+    )
+    return scaffold
+
+def plot_molecule(
+    smiles: str,
+
+    # -----------------------------
+    # Standardization options
+    # -----------------------------
+    sanitize: bool = True,
+    remove_salt: bool = False,
+    largest_fragment: bool = False,
+    uncharge: bool = False,
+    normalize: bool = False,
+    reionize: bool = False,
+    canonical_tautomer: bool = False,
+
+    # -----------------------------
+    # Molecule preparation
+    # -----------------------------
+    add_hydrogen: bool = False,
+    remove_hydrogen: bool = False,
+    kekulize: bool = True,
+
+    # -----------------------------
+    # Drawing options
+    # -----------------------------
+    size: Tuple[int, int] = (600, 400),
+    legend: str = "",
+
+    # Highlighting
+    highlight_atoms: Optional[List[int]] = None,
+    highlight_bonds: Optional[List[int]] = None,
+    atom_colors: Optional[Dict[int, Tuple[float, float, float]]] = None,
+    bond_colors: Optional[Dict[int, Tuple[float, float, float]]] = None,
+    highlight_radius: float = 0.4,
+
+    # Labels and indices
+    add_atom_indices: bool = False,
+    add_bond_indices: bool = False,
+    atom_labels: Optional[Dict[int, str]] = None,
+
+    # Styling
+    bg_color: Tuple[float, float, float] = (1, 1, 1),
+    transparent_background: bool = False,
+    bond_line_width: float = 2.0,
+    atom_font_size: int = 16,
+    fixed_bond_length: Optional[float] = None,
+
+    # Output
+    image_type: str = "PIL",   # PIL or SVG
+    savepath: Optional[str] = None,
+    return_mol: bool = False
+) -> Union[Image.Image, str, tuple]:
+
+    """
+    Draw and optionally standardize a molecule from SMILES.
+
+    Standardization operations include:
+    - Salt removal
+    - Largest fragment selection
+    - Uncharging
+    - Normalization
+    - Reionization
+    - Canonical tautomer generation
+
+    Draw a molecule from a SMILES string with customizable options.
+
+    Parameters
+    ----------
+    smiles : str
+        SMILES representation of molecule.
+
+    add_hydrogen : bool
+        Whether to add explicit hydrogens.
+
+    kekulize : bool
+        Whether to kekulize aromatic structures.
+
+    size : tuple
+        Image size (width, height).
+
+    highlight_atoms : list
+        Atom indices to highlight.
+
+    highlight_bonds : list
+        Bond indices to highlight.
+
+    atom_colors : dict
+        Dictionary mapping atom index -> RGB color tuple.
+        Example: {0: (1, 0, 0)}
+
+    bond_colors : dict
+        Dictionary mapping bond index -> RGB color tuple.
+
+    highlight_radius : float
+        Radius for highlighted atoms.
+
+    add_atom_indices : bool
+        Display atom indices.
+
+    add_bond_indices : bool
+        Display bond indices.
+
+    atom_labels : dict
+        Custom atom labels.
+        Example: {0: "N1"}
+
+    legend : str
+        Caption below molecule.
+
+    bg_color : tuple
+        Background RGB color.
+
+    bond_line_width : float
+        Width of bond lines.
+
+    atom_font_size : int
+        Font size for atom labels.
+
+    fixed_bond_length : float
+        Optional fixed bond length.
+
+    image_type : str
+        "PIL" or "SVG".
+
+    return_mol : bool
+        Return RDKit Mol object along with image.
+
+    savepath : str
+        Path to save output image.
+
+    Returns
+    -------
+    PIL.Image or SVG string or tuple
+    """
+
+    # =========================================================
+    # Create molecule
+    # =========================================================
+    mol = Chem.MolFromSmiles(smiles, sanitize=sanitize)
+
+    if mol is None:
+        raise ValueError("Invalid SMILES string.")
+
+    # =========================================================
+    # Standardization pipeline
+    # =========================================================
+
+    # Remove salts / counter ions
+    if remove_salt:
+        remover = rdMolStandardize.SaltRemover()
+        mol = remover.StripMol(mol, dontRemoveEverything=True)
+
+    # Keep largest fragment only
+    if largest_fragment:
+        chooser = rdMolStandardize.LargestFragmentChooser()
+        mol = chooser.choose(mol)
+
+    # Normalize functional groups
+    if normalize:
+        normalizer = rdMolStandardize.Normalizer()
+        mol = normalizer.normalize(mol)
+
+    # Reionize molecule
+    if reionize:
+        reionizer = rdMolStandardize.Reionizer()
+        mol = reionizer.reionize(mol)
+
+    # Neutralize charges
+    if uncharge:
+        uncharger = rdMolStandardize.Uncharger()
+        mol = uncharger.uncharge(mol)
+
+    # Canonical tautomer
+    if canonical_tautomer:
+        enumerator = rdMolStandardize.TautomerEnumerator()
+        mol = enumerator.Canonicalize(mol)
+
+    # =========================================================
+    # Hydrogen handling
+    # =========================================================
     if add_hydrogen:
         mol = Chem.AddHs(mol)
-        
-    img = Chem.Draw.MolToImage(mol, size=size, highlightAtoms=highlight_idx)
-    if savepath:
-        img.save(savepath)
-    
+
+    if remove_hydrogen:
+        mol = Chem.RemoveHs(mol)
+
+    # =========================================================
+    # Kekulization
+    # =========================================================
+    if kekulize:
+        try:
+            Chem.Kekulize(mol)
+        except:
+            pass
+
+    # =========================================================
+    # Drawing setup
+    # =========================================================
+    if image_type.upper() == "SVG":
+        drawer = rdMolDraw2D.MolDraw2DSVG(size[0], size[1])
+    else:
+        drawer = rdMolDraw2D.MolDraw2DCairo(size[0], size[1])
+
+    options = drawer.drawOptions()
+
+    options.addAtomIndices = add_atom_indices
+    options.addBondIndices = add_bond_indices
+    options.bondLineWidth = bond_line_width
+    options.baseFontSize = atom_font_size / 20
+    if transparent_background:
+        options.setBackgroundColour((1, 1, 1, 0))   # transparent RGBA
+    else:
+        options.setBackgroundColour(bg_color)
+
+    if fixed_bond_length is not None:
+        options.fixedBondLength = fixed_bond_length
+
+    # Custom labels
+    if atom_labels is not None:
+        for idx, label in atom_labels.items():
+            options.atomLabels[idx] = label
+
+    # Defaults
+    if highlight_atoms is None:
+        highlight_atoms = []
+
+    if highlight_bonds is None:
+        highlight_bonds = []
+
+    if atom_colors is None:
+        atom_colors = {}
+
+    if bond_colors is None:
+        bond_colors = {}
+
+    # =========================================================
+    # Draw molecule
+    # =========================================================
+    rdMolDraw2D.PrepareAndDrawMolecule(
+        drawer,
+        mol,
+        legend=legend,
+        highlightAtoms=highlight_atoms,
+        highlightBonds=highlight_bonds,
+        highlightAtomColors=atom_colors,
+        highlightBondColors=bond_colors,
+        highlightAtomRadii={
+            idx: highlight_radius for idx in highlight_atoms
+        }
+    )
+
+    drawer.FinishDrawing()
+
+    # =========================================================
+    # Output handling
+    # =========================================================
+    if image_type.upper() == "SVG":
+
+        img = drawer.GetDrawingText()
+        if savepath:
+            with open(savepath, "w", encoding="utf-8") as f:
+                f.write(img)
+
+    else:
+        img_data = drawer.GetDrawingText()
+        img = Image.open(BytesIO(img_data)).convert("RGBA")
+
+        if savepath:
+            img.save(savepath)
+
+    if return_mol:
+        return img, mol
+
     return img
 
 
@@ -423,10 +697,10 @@ def plot_smiles_grid(smiles_list: List[str],
                 ax.imshow(img)
                 # Titles and legends
                 if titles and i < len(titles) and titles[i]:
-                    ax.set_title(titles[i], fontsize=titlefontsize)
+                    ax.set_title(titles[i], fontsize=titlefontsize, fontweight="bold")
                 if legends and i < len(legends) and legends[i]:
                     ax.text(0.5, -0.12, legends[i], fontsize=legendfontsize,
-                            ha="center", va="center", transform=ax.transAxes)
+                            ha="center", va="center", transform=ax.transAxes, fontweight="bold")
             else:
                 ax.text(0.5, 0.5, 'Invalid SMILES',
                         ha='center', va='center', fontsize=legendfontsize)
@@ -572,7 +846,7 @@ def plot_smiles_grid(smiles_list: List[str],
 #         plt.show()
 
         
-def draw_mol_grid_with_legends(smiles_list: List[str],
+def plot_mol_grid_with_legends(smiles_list: List[str],
                                legends: List[str],
                                highlights: List[int],
                                grid_size: Tuple[int] = (3, 3),
@@ -2046,7 +2320,7 @@ def nearest_neighbours_smiles(model: (nn.Module | RandomForestRegressor),
                        X_test: (pd.DataFrame | torch.Tensor),
                        y_train: (pd.DataFrame | torch.Tensor),
                        y_test: (pd.DataFrame | torch.Tensor),
-                       smiles_list_rr: Any,
+                       smiles_list_test: Any,
                        smiles_list_train: Any,
                        n_neighbors: int = 1,
                        check_fingerprint: bool = False,
@@ -2127,8 +2401,8 @@ def nearest_neighbours_smiles(model: (nn.Module | RandomForestRegressor),
         original_rr.append(round(y_test[i].item(), 4))
         n_neighbour_original.append(round(y_train[nn_idx].item(), 4))
         
-        smi_list_rr_then_train.append(smiles_list_rr[i])
-        smi_list_rr.append(smiles_list_rr[i])
+        smi_list_rr_then_train.append(smiles_list_test[i])
+        smi_list_rr.append(smiles_list_test[i])
         legends.append(f'T:{original_rr[i]}-P:{predicted_rr[i]}(In)')
         
         smi_list_rr_then_train.append(smiles_list_train[nn_idx])
@@ -2139,7 +2413,7 @@ def nearest_neighbours_smiles(model: (nn.Module | RandomForestRegressor),
         
         if check_fingerprint:
             for name in fingerprint_names:
-                smiles_sim, _ = closest_neighbour_smiles(smiles_list_rr[i],
+                smiles_sim, _ = closest_neighbour_smiles(smiles_list_test[i],
                                                         smiles_list_train,
                                                         fingerprint_name=name,
                                                         distance_metric=distance_metric,

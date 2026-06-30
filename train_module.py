@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from typing import Union, Tuple, Dict, List, Any
+from typing import Union, Tuple, Dict, List, Any, Callable
 import os, sys, pickle, copy, re, warnings
 import numpy as np
 import pandas as pd
@@ -34,13 +34,53 @@ from torchvision.datasets.utils import download_url
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from Generalised_data_utils import regression_test_metrics, datetime_now, create_folder, subset_loader, get_func_input_names, auto_repr
 
-__all__ = ['NN_Trainer',
+__all__ = ['Tee',
+           'NN_Trainer',
            'weights_initializer',
            'EarlyStopping',
            'Trainer_functions',
            'TransferWeights'
            ]
 
+def move_to_device(obj, device):
+    
+    if obj is None:
+        return None
+
+    # tensor-like objects
+    if hasattr(obj, "to"):
+        return obj.to(device)
+
+    # dictionaries
+    if isinstance(obj, dict):
+        return {k: move_to_device(v, device) for k, v in obj.items() if v is not None}
+
+    # lists
+    if isinstance(obj, list):
+        return [move_to_device(v, device) for v in obj if v is not None]
+
+    # tuples
+    if isinstance(obj, tuple):
+        return tuple(move_to_device(v, device) for v in obj if v is not None)
+
+    # everything else
+    return obj
+
+def check_for_nans_in_predictions(y, name='y'):
+    
+    y_np = np.asarray(y)
+    num_nan = np.isnan(y_np).sum()
+    num_inf = np.isinf(y_np).sum()
+    indices = np.where(np.isnan(y_np))[0]
+    
+    print(f"NaN in {name}: {num_nan}")
+    print(f"Inf in {name}: {num_inf}")
+    
+    if np.isnan(y_np).any():
+        idx = indices[:5]
+        print(f"Sample {name} NaNs at indices:", idx)
+        print(f"Corresponding {name}:", y_np[idx])
+        
 class EarlyStopping:
     def __init__(self, stop_patience: int = 10, min_delta: float = 1e-5, type_: str = 'loss'):
         """
@@ -91,7 +131,121 @@ class EarlyStopping:
                 self.counter += 1
                 if self.counter >= self.patience:
                     self.early_stop = True
-                    
+ 
+class Tee:
+    """
+    A simple utility class that replicates the behavior of the Unix `tee` command
+    for Python file-like objects. It allows a single stream of output to be written
+    simultaneously to multiple destinations.
+
+    This class is particularly useful when you want to mirror output (for example,
+    standard output or logging messages) to multiple targets such as:
+
+        - the terminal (stdout)
+        - a log file
+        - multiple log files
+        - other file-like streams
+
+    The `Tee` object implements the minimal file-like interface required by many
+    Python APIs (`write` and `flush`). Because of this, it can be used as a drop-in
+    replacement for streams like `sys.stdout` or `sys.stderr`.
+
+    Example
+    -------
+    Redirect output to both console and a file:
+
+    >>> import sys
+    >>> log = open("output.log", "w")
+    >>> sys.stdout = Tee(sys.stdout, log)
+    >>> print("This message will appear in the console and in output.log")
+
+    Attributes
+    ----------
+    files : tuple
+        A tuple containing file-like objects that support at least the methods
+        `write()` and `flush()`. Each write operation will be forwarded to all
+        of these streams.
+
+    Notes
+    -----
+    - Each file-like object must implement `write(str)` and `flush()`.
+    - The class does not manage file closing; the caller is responsible for
+      closing any opened file handles.
+    - The `flush()` calls ensure that buffered streams immediately write their
+      contents to disk or the terminal.
+    """
+
+    def __init__(self, *files):
+        """
+        Initialize a Tee object with one or more file-like output streams.
+
+        Parameters
+        ----------
+        *files : file-like objects
+            Variable number of objects that behave like files. Each object must
+            implement at least the following methods:
+
+            - `write(str)` : Writes a string to the stream.
+            - `flush()`    : Forces buffered output to be written immediately.
+
+            Typical examples include:
+            - `sys.stdout`
+            - open file handles
+            - logging streams
+            - other custom stream objects
+
+        Example
+        -------
+        >>> import sys
+        >>> f = open("log.txt", "w")
+        >>> tee = Tee(sys.stdout, f)
+        """
+        self.files = files
+
+    def write(self, obj):
+        """
+        Write a string to all registered file-like objects.
+
+        This method forwards the provided text to every stream stored in
+        `self.files`. After writing, it immediately flushes each stream to
+        ensure that the output is not buffered.
+
+        Parameters
+        ----------
+        obj : str
+            The text content to be written to each output stream. In most
+            cases this will be the string passed by `print()` or other
+            logging functions.
+
+        Notes
+        -----
+        - This method allows the `Tee` object to behave like a standard
+          file object for output redirection.
+        - Each destination stream receives identical output.
+        """
+        for f in self.files:
+            f.write(obj)
+            f.flush()
+
+    def flush(self):
+        """
+        Flush all underlying file-like streams.
+
+        This ensures that any buffered output is immediately written to
+        its destination. Many systems buffer output for efficiency, but
+        explicit flushing is often desirable when real-time logging or
+        monitoring is required.
+
+        This method exists primarily to maintain compatibility with the
+        standard Python file interface so that the object can safely be
+        used as a replacement for `sys.stdout` or `sys.stderr`.
+
+        Example
+        -------
+        >>> tee.flush()
+        """
+        for f in self.files:
+            f.flush()                  
                 
 class Trainer_functions:
     
@@ -306,13 +460,12 @@ class Trainer_functions:
         with torch.no_grad():  # No need to compute gradients during evaluation
             for batch in progress_bar:
                 targets = batch.pop(targets_col).to(device)
-                try:
-                    batch = {k: batch[k].to(device) for k in model_params if (k in batch.keys()) and (batch[k] is not None)}
-                except:
-                    batch = {k: [temp_v.to(device) for temp_v in batch[k] if temp_v is not None] for k in model_params if k in batch.keys()}
+                batch = {k: move_to_device(batch[k], device) for k in model_params if k in batch and batch[k] is not None}
+                # try:
+                #     batch = {k: batch[k].to(device) for k in model_params if (k in batch.keys()) and (batch[k] is not None)}
+                # except:
+                #     batch = {k: [temp_v.to(device) for temp_v in batch[k] if temp_v is not None] for k in model_params if k in batch.keys()}
                 
-                # batch = {k: v.to(device) for k, v in batch.items()}
-                # targets = batch.pop(targets_col)
                 outputs = model(**batch)
                 # print(outputs.shape)
                 # print(targets.shape)
@@ -341,7 +494,8 @@ class Trainer_functions:
                 targets_col: str = 'labels',
                 description: str = 'Test',
                 device: str=torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
-                verbose=True
+                verbose=True,
+                nn_input2output: Callable = nn_input2output,
                 ) -> Tuple[Dict[str, float], float]:
         
         """
@@ -360,14 +514,14 @@ class Trainer_functions:
                 - epoch_test_loss: Average test loss.
         """
         
-        y_pred, y_true, epoch_test_loss = Trainer_functions.nn_input2output(model=model,
-                                                                test_loader=test_loader,
-                                                                criterion=criterion,
-                                                                targets_col=targets_col,
-                                                                description = description,
-                                                                device=device,
-                                                                verbose=verbose
-                                                                )
+        y_pred, y_true, epoch_test_loss = nn_input2output(model=model,
+                                                        test_loader=test_loader,
+                                                        criterion=criterion,
+                                                        targets_col=targets_col,
+                                                        description = description,
+                                                        device=device,
+                                                        verbose=verbose
+                                                        )
         results = regression_test_metrics(y_true=y_true, y_pred=y_pred)
             
         return results, epoch_test_loss
@@ -381,7 +535,8 @@ class Trainer_functions:
                 targets_col: str = 'labels',
                 description: str = 'Train-Test',
                 device: str=torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
-                verbose=True
+                verbose=True,
+                nn_input2output: Callable = nn_input2output,
                 ) -> Tuple[float, float]:
         
         """
@@ -399,27 +554,17 @@ class Trainer_functions:
                 - r2: Coefficient of determination (R² score) on the test set.
                 - epoch_test_loss: Average loss over the test set.
         """
-        y_pred, y_true, epoch_test_loss = Trainer_functions.nn_input2output(model=model,
-                                                                test_loader=test_loader,
-                                                                criterion=criterion,
-                                                                targets_col=targets_col,
-                                                                description=description,
-                                                                device=device,
-                                                                verbose=verbose
-                                                                )
-        # y_true_np = np.asarray(y_true)
-        # y_pred_np = np.asarray(y_pred)
+        y_pred, y_true, epoch_test_loss = nn_input2output(model=model,
+                                                        test_loader=test_loader,
+                                                        criterion=criterion,
+                                                        targets_col=targets_col,
+                                                        description=description,
+                                                        device=device,
+                                                        verbose=verbose
+                                                        )
         
-        # print("NaN in y_true:", np.isnan(y_true_np).sum())
-        # print("NaN in y_pred:", np.isnan(y_pred_np).sum())
-
-        # print("Inf in y_true:", np.isinf(y_true_np).sum())
-        # print("Inf in y_pred:", np.isinf(y_pred_np).sum())
-
-        # if np.isnan(y_pred_np).any():
-        #     idx = np.where(np.isnan(y_pred_np))[0][:5]
-        #     print("Sample y_pred NaNs at indices:", idx)
-        #     print("Corresponding y_true:", y_true_np[idx])
+        # check_for_nans_in_predictions(y_true, name='y_true')
+        # check_for_nans_in_predictions(y_pred, name='y_pred')
             
         # Calculate metrics
         r2 = r2_score(y_true=y_true, y_pred=y_pred)
@@ -471,12 +616,12 @@ class Trainer_functions:
         
         for i, batch in progress_bar:
             # print(f'Train Batch: {i}\n')
-            # batch = {k: v.to(device) for k, v in batch.items() if k in model_params}
             targets = batch.pop(targets_col).to(device)
-            try:
-                batch = {k: batch[k].to(device) for k in model_params if (k in batch.keys()) and (batch[k] is not None)}
-            except:
-                batch = {k: [temp_v.to(device) for temp_v in batch[k] if temp_v is not None] for k in model_params if k in batch.keys()}
+            batch = {k: move_to_device(batch[k], device) for k in model_params if k in batch and batch[k] is not None}
+            # try:
+            #     batch = {k: batch[k].to(device) for k in model_params if (k in batch.keys()) and (batch[k] is not None)}
+            # except:
+            #     batch = {k: [temp_v.to(device) for temp_v in batch[k] if temp_v is not None] for k in model_params if k in batch.keys()}
             optimizer.zero_grad()
             outputs = model(**batch)
                 
@@ -519,6 +664,8 @@ class Trainer_functions:
                     test_loader: DataLoader[Dict[str, torch.Tensor]],
                     criterion: nn.Module,
                     optimizer: torch.optim.Optimizer,
+                    train_1epoch: Callable = train_1epoch,
+                    train_test_model: Callable = train_test_model,
                     param_reg: str = '',
                     targets_col: str = 'labels',
                     scheduler_name: str = '',
@@ -541,7 +688,7 @@ class Trainer_functions:
                     standardscaler: Any = None,
                     save_model_wrt: str = 'loss', # 'loss' or 'accuracy'
                     more_description = '',
-                    save_model_per_epoch: int = 50,
+                    save_model_per_epoch: int = None,#50,
                     DATETIME: str = datetime_now(path=False)[0],
                     date: str = datetime_now(path=False)[1],
                     TIME: str = datetime_now(path=False)[2],
@@ -608,49 +755,56 @@ class Trainer_functions:
         num_val = len(val_loader.dataset)
         
         out =  (
-                    f"{'='*60}\n"
-                    f"## NN_Trainer Configuration ##\n"
-                    f"{'-'*60}\n"
-                    f"{'    Date & Time':35}: {DATETIME}\n"
-                    f"{'    torch_version':35}: {torch.__version__}\n"
-                    f"{'    platform':35}: {platform.platform()}\n"
-                    f"{'    OS':35}: {platform.system()} {platform.release()}\n"
-                    f"{'    Python Version':35}: {platform.python_implementation()} {platform.python_version()}\n"
-                    f"{'    Python Build':35}: {platform.python_build()}\n"
-                    f"{'    Python Compiler':35}: {platform.python_compiler()}\n"
-                    f"{'    Python Architecture':35}: {platform.architecture()}\n"
-                    f"{'    Hostname':35}: {platform.node()}\n"
-                    f"{'-'*60}\n"
-                    f"{'    Model':35}: {model.__class__.__name__}\n"
-                    f"{'    Device':35}: {device}\n"
-                    f"{'    Epochs':35}: {num_epochs}\n"
-                    f"{'    Batch Size':35}: {batch_size}\n"
-                    f"{'    Optimizer':35}: {optimizer.__class__.__name__}\n"
-                    f"{'    Loss Function':35}: {criterion.__class__.__name__}\n"
-                    f"{'    Scheduler':35}: {scheduler_name if scheduler_name else 'None'}\n"
-                    f"{'    Scheduler Arguments':35}: {schedulers_kwargs if scheduler_name else 'N/A'}\n"
-                    f"{'    Early Stopping':35}: {'Enabled' if early_stop else 'Disabled'}\n"
-                    f"{'    Early Stop Arguments':35}: {early_stop_kwargs if early_stop else 'N/A'}\n"
-                    f"{'    Results Save Path':35}: {results_savepath}\n"
-                    f"{'    Save Model Based On':35}: {save_model_wrt}\n"
-                    f"{'    Best Model File Path':35}: {best_model_savepath}\n"
-                    f"{'    Output Plot Filename':35}: {save_image_filename}.png\n"
-                    f"\n"
-                    f"{'-'*60}\n"
-                    f"{'## Dataset Sizes ##'}\n"
-                    f"{'-'*60}\n"
-                    f"{'    Train Set':35}: {num_train} samples\n"
-                    f"{'    Validation Set':35}: {num_val} samples\n"
-                    f"{'    Test Set':35}: {num_test} samples\n\n"
-                    f"{'    Train-Test Subset':35}: {int(num_train * subset_ratio)} samples\n"
-                    f"{'    Val-Test Subset':35}: {int(num_val * subset_ratio)} samples\n"
-                    f"{'    Test-Test Subset':35}: {int(num_test * subset_ratio)} samples\n"
-                    f"{'-'*60}\n"
-                    f"{'## Representation ##'}\n"
-                    f"{'-'*60}\n"
-                    f"{repr(model)}\n"
-                    f"{'-'*60}\n"
-
+                f"{'='*60}\n"
+                f"NN_Trainer Configuration\n"
+                f"{'-'*60}\n"
+                f"{'    Date':35} : {DATETIME}\n"
+                f"{'    torch_version':35}: {torch.__version__}\n"
+                f"{'    platform':35}: {platform.platform()}\n"
+                f"{'    OS':35}: {platform.system()} {platform.release()}\n"
+                f"{'    Python Version':35}: {platform.python_implementation()} {platform.python_version()}\n"
+                f"{'    Python Build':35}: {platform.python_build()}\n"
+                f"{'    Python Compiler':35}: {platform.python_compiler()}\n"
+                f"{'    Python Architecture':35}: {platform.architecture()}\n"
+                f"{'    Hostname':35}: {platform.node()}\n"
+                f"{'-'*60}\n"
+                f"{'    Model':35}: {model.__class__.__name__}\n"
+                f"{'    Device':35}: {device}\n"
+                f"{'    Epochs':35}: {num_epochs}\n"
+                f"{'    Batch Size':35}: {batch_size}\n"
+                f"{'    Optimizer':35}: {optimizer.__class__.__name__}\n"
+                f"{'    Learning Rate':35} : {optimizer.param_groups[0]['lr']}\n"
+                f"{'    Loss Function':35}: {criterion.__class__.__name__}\n"
+                f"{'    Scheduler':35}: {scheduler_name if scheduler_name else 'None'}\n"
+                f"{'    Scheduler Arguments':35}: {schedulers_kwargs if scheduler_name else 'N/A'}\n"
+                f"{'    Early Stopping':35}: {'Enabled' if early_stop else 'Disabled'}\n"
+                f"{'    Early Stop Arguments':35}: {early_stop_kwargs if early_stop else 'N/A'}\n"
+                f"{'    Results Save Path':35}: {results_savepath}\n"
+                f"{'    Models Save Path':35} : {models_savepath}\n"
+                f"{'    Save Model Based On':35}: {save_model_wrt}\n"
+                f"{'    Best Model File Path':35}: {best_model_savepath}\n"
+                f"{'    Output Plot Filename':35}: {save_image_filename}.png\n"
+                f"{'    Loss Save Filename':35} : {loss_save_filename}\n"
+                f"{'    Model Save Frequency (epochs)':35} : {save_model_per_epoch}\n"
+                f"{'    Subset Ratio':35} : {subset_ratio}\n"
+                f"{'    Standard Scaler':35} : {standardscaler if standardscaler else 'None'}\n"
+                f"{'    Description File Name':35} : {description_savename}\n"
+                f"{'    Target Column':35} : {targets_col}\n"
+                f"\n"
+                f"{'## Dataset Sizes ##'}\n"
+                f"{'-'*60}\n"
+                f"{'    Train Set':35}: {num_train} samples\n"
+                f"{'    Validation Set':35}: {num_val} samples\n"
+                f"{'    Test Set':35}: {num_test} samples\n\n"
+                f"{'    Train-Test Subset':35}: {int(num_train * subset_ratio)} samples\n"
+                f"{'    Val-Test Subset':35}: {int(num_val * subset_ratio)} samples\n"
+                f"{'    Test-Test Subset':35}: {int(num_test * subset_ratio)} samples\n"
+                f"{'-'*60}\n"
+                f"{'## Network Representation ##'}\n"
+                f"{'-'*60}\n"
+                f"{repr(model)}\n"
+                f"{'-'*60}\n"
+                f"{'='*60}\n"
                 )
         out = out + more_description +'\n' + '='*80 
         description_savepath = f'{results_savepath}/{description_savename}'
@@ -694,14 +848,18 @@ class Trainer_functions:
         early_stop_kwargs={**early_stop_kwargs, 'type_':save_model_wrt}
         early_stopping = EarlyStopping(**early_stop_kwargs) if early_stop and early_stop_kwargs else None
         progress_bar = tqdm(range(num_epochs), desc="Training", unit="Eps")
-
+        
+        # ## =====================================================  
+        # ## Only for New_Model GIN training to save component losses. Should not be used for in general model training
+        # extra_loss = []
+        # ## =====================================================  
         for epoch in progress_bar:
             if verbose:
                 tqdm.write(f"-"*80)
                 tqdm.write(f"Epoch - {epoch + 1}/{num_epochs}:")
             model.train()
             # init = time.time()
-            epoch_train_loss = Trainer_functions.train_1epoch(model,
+            epoch_train_loss = train_1epoch(model,
                                             train_loader,
                                             criterion,
                                             optimizer,
@@ -711,15 +869,36 @@ class Trainer_functions:
                                             description = 'Training',
                                             verbose=verbose
                                             )
-            train_acc, epoch_train_loss = Trainer_functions.train_test_model(model=model, test_loader=train_loader_subset,
+            train_acc, epoch_train_loss = train_test_model(model=model, test_loader=train_loader_subset,
                                                         criterion=criterion, device=device, targets_col=targets_col,
                                                         description='Test-on-Train', verbose=verbose)
-            test_acc, epoch_test_loss = Trainer_functions.train_test_model(model=model, test_loader=test_loader_subset,
+            test_acc, epoch_test_loss   = train_test_model(model=model, test_loader=test_loader_subset,
                                                         criterion=criterion, device=device, targets_col=targets_col,
                                                         description='Test-on-Test', verbose=verbose)
-            val_acc, epoch_val_loss = Trainer_functions.train_test_model(model=model, test_loader=val_loader_subset,
+            val_acc, epoch_val_loss     = train_test_model(model=model, test_loader=val_loader_subset,
                                                         criterion=criterion, device=device, targets_col=targets_col,
                                                         description='Test-on-Val', verbose=verbose)
+            
+            # ## =====================================================  
+            # ## Only for New_Model GIN training to save component losses. Should not be used for in general model training.   
+            
+            # train_acc, epoch_train_loss, train_losses = train_test_model(model=model, test_loader=train_loader_subset,
+            #                                             criterion=criterion, device=device, targets_col=targets_col,
+            #                                             description='Test-on-Train', verbose=verbose)
+            # test_acc, epoch_test_loss, test_losses = train_test_model(model=model, test_loader=test_loader_subset,
+            #                                             criterion=criterion, device=device, targets_col=targets_col,
+            #                                             description='Test-on-Test', verbose=verbose)
+            # val_acc, epoch_val_loss, val_losses = train_test_model(model=model, test_loader=val_loader_subset,
+            #                                             criterion=criterion, device=device, targets_col=targets_col,
+            #                                             description='Test-on-Val', verbose=verbose)
+             
+            # temp_dict = OrderedDict({})
+            # for key in train_losses.keys():
+            #     for k, v in {'train':train_losses, 'test':test_losses, 'val':val_losses}.items():
+            #         temp_dict[f'{k}_{key}'] = v[key]
+            # extra_loss.append(temp_dict)
+            # ## =====================================================  
+            
             # print(f'Req time: {time.time() - init}')
             # train_acc, test_acc, val_acc = train_acc, test_acc, val_acc
             train_acc_list[epoch] = round(train_acc, 4)
@@ -741,7 +920,7 @@ class Trainer_functions:
 
             if condition_flag:
                 if verbose:
-                        print(f"\033[31m### Best model -> | Epoch: {epoch + 1} | Val loss: {epoch_val_loss:.4f} | Val accuracy: {val_acc:.4f} | \033[0m")
+                        print(f"\n\033[31m### Best model -> | Epoch: {epoch + 1} | Val loss: {epoch_val_loss:.4f} | Val accuracy: {val_acc:.4f} | \033[0m")
                 if save_model:
                     # Save the best model
                     Trainer_functions.save_network(model=model, 
@@ -781,12 +960,12 @@ class Trainer_functions:
                                     })
             Trainer_functions.save_metrics_csv(data_dict=loss_dict, save_csv_filename=f"{results_savepath}/{loss_save_filename}.csv")
             
-            if (epoch % save_model_per_epoch == 0):
+            if save_model_per_epoch is not None and (epoch % save_model_per_epoch == 0):
                 
                 model_save_name = f"{models_savepath}/model_at_epoch_{epoch}"
                 if save_model:
                     if verbose:
-                        print(f"Saving model at epoch {epoch + 1} to: {model_save_name}")
+                        print(f"\nSaving model at epoch {epoch + 1} to: {model_save_name}")
                     Trainer_functions.save_network(model=model, 
                                                 optimizer=optimizer,
                                                 epoch=epoch,
@@ -827,6 +1006,13 @@ class Trainer_functions:
                     print(f"Early stop triggered at epoch: {epoch + 1}")
                     print('='*80)
                     break
+        
+        # ## =====================================================  
+        # ## Only for New_Model GIN training to save component losses. Should not be used for in general model training.      
+        # df = pd.DataFrame(extra_loss)
+        # df.to_csv(f"{results_savepath}/{loss_save_filename}_component_lossess.csv", index=False)
+        # ## =====================================================        
+        
         print(f'Best Model Details:\n  Epoch: {best_epoch+1}\n    Train Loss: {best_train_loss}, Test Loss: {best_test_loss}, Val Loss: {best_val_loss}\n   \
             Train Acc: {best_train_acc}, Test Acc: {best_test_acc}, Val Acc: {best_val_acc}')
                 
@@ -866,7 +1052,7 @@ class Trainer_functions:
                             linewidth: int = 2, 
                             linestyle: str = '-', 
                             title_fontsize: int = 25, 
-                            xyticks_fontsize: int = 10 
+                            xyticks_fontsize: int = None 
                             ) -> None:
         """
         Plots training, validation, and test accuracy and loss curves over epochs.
@@ -893,10 +1079,14 @@ class Trainer_functions:
         Returns:
             None. Saves plot as PNG file and closes the figure.
         """
+        xyticks_fontsize = xyticks_fontsize if xyticks_fontsize else title_fontsize - 8
+        legend_fontsize = xyticks_fontsize-2
+        label_fontsize = title_fontsize - 5
+        fontweight = 'bold'
         
         # Create subplots
         fig, axs = plt.subplots(1, 2, figsize=(16, 8))  # 1 row, 2 columns
-        fig.suptitle(title, fontsize=title_fontsize)  # Overall title for the subplots
+        fig.suptitle(title, fontsize=title_fontsize, fontweight=fontweight)  # Overall title for the subplots
         # Plot for accuracy
         axs[0].plot(
             range(len(train_acc)), train_acc, 
@@ -904,8 +1094,8 @@ class Trainer_functions:
             markersize=markersize, 
             linewidth=linewidth, 
             linestyle=linestyle, 
-            label='train',
-            color='green'  
+            label='Train',
+            color='red'  
         )
         axs[0].plot(
             range(len(test_acc)), test_acc, 
@@ -913,8 +1103,8 @@ class Trainer_functions:
             markersize=markersize, 
             linewidth=linewidth, 
             linestyle=linestyle, 
-            label='test',
-            color='red'  
+            label='Test',
+            color='green'  
         )
         axs[0].plot(
             range(len(val_acc)), val_acc, 
@@ -922,14 +1112,15 @@ class Trainer_functions:
             markersize=markersize, 
             linewidth=linewidth, 
             linestyle=linestyle, 
-            label='val',
+            label='Val',
             color='blue'  
         )
-        axs[0].set_xlabel(xlabel, fontsize=title_fontsize-5)
-        axs[0].set_ylabel(ylabel_acc, fontsize=title_fontsize-5)
+        axs[0].set_xlabel(xlabel, fontsize=label_fontsize, fontweight=fontweight)
+        axs[0].set_ylabel(ylabel_acc, fontsize=label_fontsize, fontweight=fontweight)
         axs[0].grid(linestyle='--')
-        axs[0].legend(loc='upper right', fontsize=xyticks_fontsize)
-        axs[0].set_title('Epoch vs Accuracy', fontsize=title_fontsize-5)
+        axs[0].legend(loc='upper right', fontsize=legend_fontsize, title='Dataset',
+                      title_fontsize=legend_fontsize, prop={'weight': fontweight})
+        axs[0].set_title('Epoch vs Accuracy', fontsize=title_fontsize, fontweight=fontweight)
         axs[0].tick_params(axis='both', labelsize=xyticks_fontsize)  # Set x and y ticks
         
         # Plot for loss
@@ -939,8 +1130,8 @@ class Trainer_functions:
             markersize=markersize, 
             linewidth=linewidth, 
             linestyle=linestyle, 
-            label='train',
-            color='green' 
+            label='Train',
+            color='red' 
         )
         axs[1].plot(
             range(len(test_loss)), test_loss, 
@@ -948,8 +1139,8 @@ class Trainer_functions:
             markersize=markersize, 
             linewidth=linewidth, 
             linestyle=linestyle, 
-            label='test',
-            color = 'red' 
+            label='Test',
+            color = 'green' 
         )
         axs[1].plot(
             range(len(val_loss)), val_loss, 
@@ -957,14 +1148,15 @@ class Trainer_functions:
             markersize=markersize, 
             linewidth=linewidth, 
             linestyle=linestyle, 
-            label='val',
+            label='Val',
             color = 'blue' 
         )
-        axs[1].set_xlabel(xlabel, fontsize=title_fontsize-5)
-        axs[1].set_ylabel(ylabel_loss, fontsize=title_fontsize-5)
+        axs[1].set_xlabel(xlabel, fontsize=label_fontsize, fontweight=fontweight)
+        axs[1].set_ylabel(ylabel_loss, fontsize=label_fontsize, fontweight=fontweight)
         axs[1].grid(linestyle='--')
-        axs[1].legend(loc='upper right', fontsize=xyticks_fontsize)
-        axs[1].set_title('Epoch vs Loss', fontsize=title_fontsize-5)
+        axs[1].legend(loc='upper right', fontsize=legend_fontsize, title='Dataset',
+                      title_fontsize=legend_fontsize, prop={'weight': fontweight})
+        axs[1].set_title('Epoch vs Loss', fontsize=title_fontsize-5, fontweight=fontweight)
         axs[1].tick_params(axis='both', labelsize=xyticks_fontsize)  # Set x and y ticks
         
         # Adjust layout
@@ -973,7 +1165,7 @@ class Trainer_functions:
         # Save the plot if a filename is provided
         if save_image_filename:
             plt.savefig(f"{save_image_filename}.png", bbox_inches='tight')  # Save as PNG
-            print(f'\033[1;35mSaved loss accuracy plot for Train-Test-Val data: "{f"{save_image_filename}.png"}"\033[0m')
+            print(f'\n\033[1;35mSaved loss accuracy plot for Train-Test-Val data: "{f"{save_image_filename}.png"}"\033[0m')
         
         # plt.show()  # Display the plot
         plt.close()  # Close the figure
@@ -1023,7 +1215,7 @@ class Trainer_functions:
         # #Bold Magenta
         # print(f'\033[1;35mSaving network in: "{network_save_filename}"\033[0m')
         # #Bold Violet
-        print(f'\033[1;95mSaving network in: "{network_save_filename}"\033[0m')
+        print(f'\n\033[1;95mSaving network at {epoch+1} in: "{network_save_filename}"\033[0m')
         
         source_file = os.path.abspath(__file__)
         with open(source_file, 'rb') as fp:
@@ -1107,7 +1299,8 @@ class Trainer_functions:
             device (str): Device to map the checkpoint onto (e.g., 'cuda' or 'cpu').
 
         Returns:
-            [model_repr, standardscaler, checkpoint, network_pyfile]
+            Output: model_repr, standardscaler, checkpoint, network_pyfile
+            
             Prints error if checkpoint is missing or corrupted.
         """
         

@@ -26,15 +26,15 @@ class SMILES_PRUNING:
                  all_atoms={'Br', 'Cl', 'P', 'I', 'F', 'H', 'S', 'N', 'O', 'C', 'B', 'Si', 'Na', 'K'},
                  prefix='',
                  sanitize=True,
-                 strip_salts: bool = False,
+                 strip_salts: bool = True,
                 salt_remover_def: Optional[str] = None,
                 keep_largest_fragment: bool = True,
                 require_organic_fragment: bool = True,
                 disconnect_metals: bool = True,
                 normalize_functional_groups: bool = True,
                 reionize: bool = True,
-                uncharge: bool = True,
-                canonicalize_tautomer: bool = True,
+                uncharge: bool = False,
+                canonicalize_tautomer: bool = False,
                 remove_explicit_h: bool = True,
                 sanitize_final: bool = True,
                 kekulize: bool = False,
@@ -379,6 +379,9 @@ def calculate_descriptors(df, smiles_column_name):
 ## Use for multiple dataset
 if __name__=='__main__':
     start = time.time()
+    
+    ## Inputs ##
+    #---------#
     smiles_column_name='Canonicalised_SMILES'
     target_col_name = 'Fu_mean'
     id_col = 'Unique_ID'
@@ -398,10 +401,12 @@ if __name__=='__main__':
                    'Hiroaki_2022':'H22'}
     prefix=f'{prefix_list[key]}040126'
     
+    ## Inputs for the computation are the dataset path and the dataframe
     data_savepath = f"/home/rkmvu/Dataset/Fraction_unbound/all_datasets/comparison_datasets/{key}.csv"
     df = df[key]
-    df = attach_ids(df, prefix=prefix, id_col=id_col)
     
+    ## Calculating descriptors ##
+    df = attach_ids(df, prefix=prefix, id_col=id_col)
     if pruning:
         smiles_pruning = SMILES_PRUNING(smiles_list=df[smiles_column_name].tolist(),
                                     labels=df[id_col],

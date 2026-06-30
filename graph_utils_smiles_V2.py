@@ -36,6 +36,7 @@ __all__ = [
     'SmilesDataset_graph_gen',
     'limit_open_files',
     'GraphData_from_pickle',
+    'smiles_to_graph',
     'feature_representation'
 ]
 with open('/home/rkmvu/Dataset/Coca-2/Experimental_Data_P_app/train_test_partition_literature/All_possible_atoms_X.pkl', 'rb') as fp:
@@ -70,20 +71,21 @@ def list_to_onehot_oov(element, elements_list, val=1.0):
     
     
 class Multirelational_GraphDataset(Dataset):
-    def __init__(self, smi_list, labels,
-                # max_num_atoms, atom_symbols, hybridization_list, chiraltypes, bonds_list, bond_weight_flag=False, include_self_loop = True,
+    
+    def __init__(self,
+                 smi_list,
+                 labels,
+                 max_num_atoms = 100,
+                 hybridization_list=['UNSPECIFIED', 'S', 'SP', 'SP2', 'SP3', 'SP2D', 'SP3D', 'SP3D2', 'OTHER'],
+                 chiraltypes=['CHI_UNSPECIFIED', 'CHI_TETRAHEDRAL_CW', 'CHI_TETRAHEDRAL_CCW'],
                  **kwargs
                  ):
+        
         self.smi_list = smi_list
         self.labels = labels
-        # self.max_num_atoms = max_num_atoms
-        # self.atom_symbols = atom_symbols
-        # self.hybridization_list = hybridization_list
-        # self.chiraltypes = chiraltypes
-        # self.bonds_list = bonds_list
-        # self.num_relations = len(bonds_list)
-        # self.bond_weight_flag = bond_weight_flag
-        # self.include_self_loop = include_self_loop
+        self.max_num_atoms = max_num_atoms
+        self.hybridization_list = hybridization_list
+        self.chiraltypes = chiraltypes
     
     def __len__(self):
         return len(self.smi_list)
@@ -146,7 +148,10 @@ class Multirelational_GraphDataset(Dataset):
     
     def smi2feature(self, smi):
         
-        descriptor_calculator = AtomicDescriptorCalculator(smi=smi)
+        descriptor_calculator = AtomicDescriptorCalculator(smi=smi,
+                                                           hybridization_list=self.hybridization_list,
+                                                           chiraltypes=self.chiraltypes
+                                                           )
         atom_features, bond_features = descriptor_calculator.get_all_molecule_properties()
         
         bond_matrix_temp = bond_features['bond_matrix']
@@ -253,41 +258,6 @@ def SmilesDataset_graph_gen(split, dataset, out_path = 'SmilesDataset_graph',
             
     # return None # SmilesDataset_graph, mean_dict, std_dict
     
-def smi2graphfeature(data,
-                     dataset_mean,
-                     dataset_std,
-                     max_num_atoms,
-                     features_list=['symbol', 'atom_properties', 'hybridization', 'aromaticity', 'ring', 'chirality', 'neighbour_info'], #'3d_descriptors'
-                     padding=True
-                     ):
-        
-    atom_feature_vector = data['atom_feature_vector']
-    try:
-        features = [atom_feature_vector[k] for k in features_list]
-        mean = [dataset_mean[k] for k in features_list]
-        std = [dataset_std[k] for k in features_list]
-    except:
-        raise AttributeError(f'Features should be in: {list(atom_feature_vector.keys())}')
-    
-    try:
-        atom_feature_vector = np.concatenate(features, axis=1)
-        atom_feature_vector = torch.from_numpy(atom_feature_vector)
-    except:
-        raise ValueError(f'Error found in: SMILES - {data['SMILES']}, Features - {atom_feature_vector}')
-    
-    dataset_mean = np.concatenate(mean)
-    dataset_std = np.concatenate(std)
-    if padding: 
-        feature_vector = torch.zeros((max_num_atoms, atom_feature_vector.shape[-1]))
-        feature_vector[:len(atom_feature_vector)] = (atom_feature_vector - dataset_mean)/dataset_std
-    else:
-        atom_feature_vector = (atom_feature_vector - dataset_mean)/dataset_std
-        
-    adjacency_matrix = data['adjacency_matrix']
-    degree_matrix = data['degree_matrix']
-    y  = data['label']
-    
-    return feature_vector, adjacency_matrix, degree_matrix, y
 
 class GraphData_from_pickle(Dataset):
     
@@ -374,14 +344,10 @@ class GraphData_from_pickle(Dataset):
 
         return feature_vectors, adjacency_matrices, degree_matrices, feat_masks, adj_masks, ys
     
-    def build_3d_adjacency(self, bond_matrix, bond_type, num_atoms):
+    @staticmethod
+    def build_3d_adjacency(bond_matrix, bond_type, num_atoms):
         
-        bond_map = {
-            "SINGLE": 0,
-            "DOUBLE": 1,
-            "TRIPLE": 2,
-            "AROMATIC": 3
-        }
+        bond_map = {"SINGLE": 0, "DOUBLE": 1, "TRIPLE": 2, "AROMATIC": 3}
         
         # Initialize adjacency tensor: [N, N, bond_features]
         A = np.zeros((4, num_atoms, num_atoms), dtype=np.float32)
@@ -431,7 +397,7 @@ class GraphData_from_pickle(Dataset):
         atom_feature_vector = torch.from_numpy(atom_feature_vector).float()
         bond_matrix = data['bond_matrix']
         
-        adjacency_tensor = self.build_3d_adjacency(bond_matrix['bond_matrix'], bond_matrix['bond_type'], self.max_num_atoms)
+        adjacency_tensor = GraphData_from_pickle.build_3d_adjacency(bond_matrix['bond_matrix'], bond_matrix['bond_type'], self.max_num_atoms)
         adj_mask = torch.zeros((4, self.max_num_atoms, self.max_num_atoms), dtype=torch.bool)
         adj_mask[:, :n_atoms, :n_atoms] = True
         degree_tensor = torch.stack([torch.diag(vector) for vector in adjacency_tensor.sum(axis=1)])
@@ -459,10 +425,195 @@ class GraphData_from_pickle(Dataset):
         
         return atom_feature_vector
     
+    @staticmethod
+    def GcnDictData2GcnInput(data,
+                            dataset_mean,
+                            dataset_std,
+                            max_num_atoms,
+                            features_list=['symbol', 'atom_properties', 'hybridization', 'aromaticity', 'ring', 'chirality', 'neighbour_info'], #'3d_descriptors'
+                            padding=True
+                            ):
+        mean = np.concatenate([dataset_mean[k] for k in features_list],axis=0)
+        std = np.concatenate([dataset_std[k] for k in features_list],axis=0)
+        
+        atom_feature_vector = data['atom_feature_vector']
+        try:
+            features = [atom_feature_vector[k] for k in features_list]
+        except:
+            raise AttributeError(f'Features should be in: {list(atom_feature_vector.keys())}')
+        
+        try:
+            atom_feature_vector = np.concatenate(features, axis=1, dtype=np.float32)
+            atom_feature_vector[atom_feature_vector == AtomicDescriptorCalculator.MASKING_VALUE] =  0
+            n_atoms = atom_feature_vector.shape[0]
+            if max_num_atoms == 0:
+                max_num_atoms = n_atoms
+            feat_mask = torch.zeros((max_num_atoms, atom_feature_vector.shape[1]), dtype=torch.bool)
+            feat_mask[:n_atoms] = True
+            feat_mask[:n_atoms] &= torch.tensor(atom_feature_vector != -99999.0)
+        except:
+            raise ValueError(f'Error found in: SMILES - {data["SMILES"]}, Features - {atom_feature_vector}')
+        
+         # Convert to tensor
+        atom_feature_vector = torch.from_numpy(atom_feature_vector).float()
+        bond_matrix = data['bond_matrix']
+        
+        adjacency_tensor = GraphData_from_pickle.build_3d_adjacency(bond_matrix['bond_matrix'], bond_matrix['bond_type'], max_num_atoms)
+        adj_mask = torch.zeros((4, max_num_atoms, max_num_atoms), dtype=torch.bool)
+        adj_mask[:, :n_atoms, :n_atoms] = True
+        degree_tensor = torch.stack([torch.diag(vector) for vector in adjacency_tensor.sum(axis=1)])
+        
+        # --- normalize and pad if needed ---
+        if padding:
+            feature_vector = torch.zeros((max_num_atoms, atom_feature_vector.shape[1]), dtype=torch.float32)
+            feature_vector[:atom_feature_vector.shape[0], :] = (atom_feature_vector - mean) / std
+        else:
+            feature_vector = (atom_feature_vector - mean) / std
+        
+        # --- get adjacency, degree, label ---
+        y                = torch.tensor(data['label'], dtype=torch.float32)
+        
+        return feature_vector, adjacency_tensor, degree_tensor, feat_mask, adj_mask, y
+    
+
+def smiles_to_graph(smiles,
+                    dataset_mean, 
+                    dataset_std, 
+                    features_list, 
+                    max_num_atoms=65, 
+                    hybridization_list=['UNSPECIFIED', 'S', 'SP', 'SP2', 'SP3', 
+                                        'SP2D', 'SP3D', 'SP3D2', 'OTHER'],
+                    chiraltypes=['CHI_UNSPECIFIED', 'CHI_TETRAHEDRAL_CW', 'CHI_TETRAHEDRAL_CCW'],
+                    padding=True,
+                    label=None,
+                    device = 'cuda:0' if torch.cuda.is_available() else 'cpu',
+                    ):
+    """
+    Convert a SMILES into the graph representation expected by the model.
+
+    Parameters
+    ----------
+    smiles : str
+    dataset_mean : dict
+    dataset_std : dict
+    features_list : list
+    max_num_atoms : int
+    padding : bool
+    label : float or None
+
+    Returns
+    -------
+    feature_vector : torch.FloatTensor
+        (max_num_atoms, feature_dim)
+
+    adjacency_tensor : torch.FloatTensor
+        (4, max_num_atoms, max_num_atoms)
+
+    degree_tensor : torch.FloatTensor
+        (4, max_num_atoms, max_num_atoms)
+
+    feat_mask : torch.BoolTensor
+        (max_num_atoms, feature_dim)
+
+    adj_mask : torch.BoolTensor
+        (4, max_num_atoms, max_num_atoms)
+
+    y : torch.FloatTensor
+    """
+
+    # ----------------------------------------------------------
+    # Normalization statistics
+    # ----------------------------------------------------------
+    mean = np.concatenate([dataset_mean[k] for k in features_list], axis=0)
+    std = np.concatenate([dataset_std[k] for k in features_list], axis=0)
+
+    # ----------------------------------------------------------
+    # Extract atomic descriptors
+    # ----------------------------------------------------------
+    descriptor_calculator = AtomicDescriptorCalculator(smi=smiles,
+                                                       hybridization_list=hybridization_list,
+                                                       chiraltypes=chiraltypes,
+                                                       )
+    atom_features, bond_features = descriptor_calculator.get_all_molecule_properties()
+
+    # ----------------------------------------------------------
+    # Build feature matrix
+    # ----------------------------------------------------------
+    features = [atom_features[k] for k in features_list]
+    atom_feature_vector = np.concatenate(features,
+                                         axis=1,
+                                         dtype=np.float32,
+                                         )
+
+    atom_feature_vector[atom_feature_vector == AtomicDescriptorCalculator.MASKING_VALUE] = 0
+
+    n_atoms = atom_feature_vector.shape[0]
+
+    if max_num_atoms == 0:
+        max_num_atoms = n_atoms
+
+    # ----------------------------------------------------------
+    # Feature mask
+    # ----------------------------------------------------------
+    feat_mask = torch.zeros((max_num_atoms, atom_feature_vector.shape[1]), dtype=torch.bool,)
+    feat_mask[:n_atoms] = True
+    feat_mask[:n_atoms] &= torch.tensor(atom_feature_vector != -99999.0)
+
+    # ----------------------------------------------------------
+    # Normalize features
+    # ----------------------------------------------------------
+    atom_feature_vector = torch.from_numpy(atom_feature_vector).float()
+
+    normalized = (atom_feature_vector - mean) / std
+
+    if padding:
+        feature_vector = torch.zeros((max_num_atoms, normalized.shape[1]), dtype=torch.float32,)
+        feature_vector[:n_atoms] = normalized
+    else:
+        feature_vector = normalized
+
+    # ----------------------------------------------------------
+    # Build adjacency tensor
+    # ----------------------------------------------------------
+    adjacency_tensor = GraphData_from_pickle.build_3d_adjacency(bond_features["bond_matrix"],
+                                                                bond_features["bond_type_str"],
+                                                                max_num_atoms,
+                                                                )
+
+    # ----------------------------------------------------------
+    # Degree tensor
+    # ----------------------------------------------------------
+    degree_tensor = torch.stack([torch.diag(channel.sum(dim=1)) for channel in adjacency_tensor])
+
+    # ----------------------------------------------------------
+    # Adjacency mask
+    # ----------------------------------------------------------
+    adj_mask = torch.zeros((4, max_num_atoms, max_num_atoms), dtype=torch.bool,)
+    adj_mask[:, :n_atoms, :n_atoms] = True
+
+    # ----------------------------------------------------------
+    # Label
+    # ----------------------------------------------------------
+    if label is None:
+        y = torch.tensor(float("nan"), dtype=torch.float32)
+    else:
+        y = torch.tensor(label, dtype=torch.float32)
+
+    # ----------------------------------------------------------
+    # Device
+    # ----------------------------------------------------------
+    feature_vector = feature_vector.to(device)
+    adjacency_tensor = adjacency_tensor.to(device)
+    degree_tensor = degree_tensor.to(device)
+    feat_mask = feat_mask.to(device)
+    adj_mask = adj_mask.to(device)
+    y = y.to(device)
+
+    return feature_vector, adjacency_tensor, degree_tensor, feat_mask, adj_mask, y
     
 def feature_representation(dataset,
                            model,
-                           device='cpu',
+                           device='cuda:0' if torch.cuda.is_available() else 'cpu',
                            input_params = ["feature_vector", "adjacency_tensor","degree_tensor",
                                            "feature_mask", "adjacency_mask", "labels"]
                            ):

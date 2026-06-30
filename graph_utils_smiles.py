@@ -38,7 +38,6 @@ __all__ = [
     'get_3d_descriptors',
     'smiles_filter_3d_descriptor',
     'get_atom_info_vector',
-    'get_atom_info_vector_for_test_purpose',
     'get_bond_matrix',
     'get_multirelational_bond_matrix',
     'GraphDataset',
@@ -50,6 +49,7 @@ __all__ = [
     'GraphData_from_pickle',
     'GraphData_from_pickle_3d_descriptor',
     'feature_representation',
+    'feature_representation_pyg',
     'gcn_pred_func',
     'filter_data',
     'separate_data',
@@ -588,118 +588,6 @@ def get_atom_info_vector_with_embeddings(smiles,
     return atom_feature_vector#, smi_feature_size
 
 
-
-def get_atom_info_vector_for_test_purpose(smiles,
-                         atom_symbols,
-                         hybridization_list,
-                         chiraltypes,
-                         bonds_list
-                         ):
-
-    mol = Chem.MolFromSmiles(smiles)
-    # mol = Chem.AddHs(mol)  # Add hydrogens
-    num_atoms = mol.GetNumAtoms()
-    # atom_descriptors_3d = [[]]*num_atoms
-    atom_properties_mol = [[]]*num_atoms
-    hybridization_atoms_list = [None]*num_atoms
-    # symbol_list = [None]*num_atoms
-    aromaticity_list = [None]*num_atoms
-    ring_list = [None]*num_atoms
-    # chirality_list = [None]*num_atoms
-    # bond_info = [None]*num_atoms
-    # neigbor_symbol_info = [None]*num_atoms
-    # neighbour_info_list = [None]*num_atoms
-    
-    if mol is None:
-        print("Invalid SMILES string")
-        return []
-    
-    # Iterate over atoms in the molecule and get properties
-    for i, atom in enumerate(mol.GetAtoms()):
-        aromatic = [0., 0.]
-        ring = [0., 0.]
-        bonds_onehot = [0.]*len(bonds_list)
-        neighbor_onehot = [0.]*len(atom_symbols)
-        
-        # ## Atom Properties from RDKit
-        # onehot_symbol = list_to_onehot(atom.GetSymbol(), atom_symbols)
-        # symbol_list[i] = onehot_symbol
-        # # print('atom_symbols', len(atom_symbols))
-        
-        # ## Chirality Encoding
-        # chirality = list_to_onehot(atom.GetChiralTag(), chiraltypes)
-        # chirality_list[i] = chirality
-        # # print('chirality', len(chirality))
-            
-        
-        ## Hybridization Encoding
-        hybridization = list_to_onehot(atom.GetHybridization(), hybridization_list)
-        hybridization_atoms_list[i] = hybridization
-        # print('hybridization', len(hybridization))
-        
-        ## Aromaticity & Ring Information Encoding
-        aromatic[int(atom.GetIsAromatic())] = 1.0 
-        aromaticity_list[i] = aromatic
-        # print('aromatic', len(aromatic))
-            
-        ring[int(atom.IsInRing())] = 1.0
-        ring_list[i] = ring
-        # print('ring', len(ring))
-        
-            
-        # ##Neighbour Symbols Encoding
-        # all_neighbours = [neighbor.GetSymbol() for neighbor in atom.GetNeighbors()]
-        # all_bonds = [str(bond.GetBondType()) for bond in atom.GetBonds()]
-        # bond_value_dict = dict({'SINGLE':1, 'DOUBLE':2, 'TRIPLE':3, 'AROMATIC':4})
-        # all_neighbours_counts = Counter(all_neighbours)
-        # temp_matrix = np.zeros((len(atom_symbols), len(bonds_list)))
-        # for j in range(len(all_neighbours)):
-        #     temp_matrix[(atom_symbols.index(all_neighbours[j]), bonds_list.index(all_bonds[j]))] = bond_value_dict[all_bonds[j]]*float(all_neighbours_counts.get(all_neighbours[j]))
-        # neighbour_info_list[i] = list(temp_matrix.flatten())
-        
-        # ## Bond Information Encoding
-        # all_bonds = [str(bond.GetBondType()) for bond in atom.GetBonds()]
-        # all_bonds_counts = Counter(all_bonds)
-        # bond_dict = {bond:all_bonds_counts.get(bond) for bond in all_bonds}
-        # for bond in all_bonds:
-        #     bonds_onehot[bonds_list.index(bond)] = float(bond_dict[bond])
-        # bond_info[i] = bonds_onehot
-            
-        # ##Neighbour Symbols Encoding
-        # all_neighbours = [neighbor.GetSymbol() for neighbor in atom.GetNeighbors()]
-        # all_neighbours_counts = Counter(all_neighbours)
-        # for neigh in all_neighbours:
-        #     neighbor_onehot[atom_symbols.index(neigh)] = float(all_neighbours_counts.get(neigh))#1.0
-        # neigbor_symbol_info[i] = neighbor_onehot
-            
-   
-    ## Atom 2D Properties 
-    atom_properties_mol = get_properties_smiles(smiles)
-     
-    ## Atom 3D Properties
-    # atom_descriptors_3d, _ = get_3d_descriptors(smiles=smiles)
-    
-    atom_feature_vector = {
-        # 'symbol':np.array(symbol_list),
-        'rdkit_2d_atom_prop':np.array(atom_properties_mol)[:, :10],
-        'electronegetivity_infos':np.array(atom_properties_mol)[:, 10:],
-        'atom_properties':np.array(atom_properties_mol),
-        'hybridization':np.array(hybridization_atoms_list),
-        'aromaticity':np.array(aromaticity_list),
-        'ring':np.array(ring_list),
-        # 'chirality':np.array(chirality_list),
-        # 'bond_info':np.array(bond_info),
-        # 'neigbor_symbol_info':np.array(neigbor_symbol_info),
-        # 'gasteiger_charge':np.array(atom_descriptors_3d)[:, :1],
-        # 'coordinates':np.array(atom_descriptors_3d)[:, 1:],
-        # '3d_descriptors':np.array(atom_descriptors_3d),
-        # 'neighbour_info':np.array(neighbour_info_list)
-    }
-    
-    return atom_feature_vector#, smi_feature_size
-
-
-
 def get_bond_matrix(smiles, weighted_flag = True):
         
     mol = Chem.MolFromSmiles(smiles)
@@ -779,9 +667,8 @@ class SMILEStoPyGGraphDataset(pyg_dataset):
                  hybridization_list,
                  chiraltypes,
                  bonds_list,
-                 mean=0,
-                 std=1,
-                 features_list=['atom_properties', 'hybridization', 'aromaticity', 'ring', 'logP_values']):
+                 features_list=['atom_properties', 'hybridization', 'aromaticity', 'ring', 'logP_values']
+                 ):
         self.smi_list = smi_list
         self.labels = labels
         self.atom_symbols = atom_symbols
@@ -789,8 +676,42 @@ class SMILEStoPyGGraphDataset(pyg_dataset):
         self.chiraltypes = chiraltypes
         self.bonds_list = bonds_list
         self.features_list = features_list
-        self.mean=mean
-        self.std=std
+        
+        # Compute mean/std internally (train dataset only ideally)
+        self.mean, self.std = self._compute_feature_stats()
+
+    # ==========================================================
+    # Compute dataset-wide statistics
+    # ==========================================================
+    def _compute_feature_stats(self):
+
+        all_features = []
+
+        for smi in self.smi_list:
+            mol = Chem.MolFromSmiles(smi)
+            if mol is None:
+                continue
+
+            atom_features = self.atom_vector(
+                mol,
+                atom_symbols=self.atom_symbols,
+                hybridization_list=self.hybridization_list,
+                chiraltypes=self.chiraltypes,
+                bonds_list=self.bonds_list,
+                features_list=self.features_list
+            )
+
+            atom_features = np.concatenate([atom_features[key] for key in self.features_list], axis=1)
+            all_features.append(atom_features)
+
+        stacked = np.vstack(all_features)
+
+        mean = torch.tensor(stacked.mean(axis=0), dtype=torch.float32)
+        std = torch.tensor(stacked.std(axis=0), dtype=torch.float32)
+
+        std[std == 0] = 1.0  # avoid division by zero
+        
+        return mean, std
 
     def __len__(self):
         return len(self.smi_list)
@@ -912,6 +833,8 @@ class SMILEStoPyGGraphDataset(pyg_dataset):
                                          )
         atom_features = np.concatenate([atom_features[key] for key in self.features_list], axis=1)
         x = torch.as_tensor(atom_features, dtype=torch.float)
+        x = (x - self.mean) / self.std
+
         # x = torch.stack([atom_vector(atom) for atom in mol.GetAtoms()])
 
         # Edges
@@ -931,12 +854,13 @@ class SMILEStoPyGGraphDataset(pyg_dataset):
         edge_attr = torch.stack(edge_attr) if len(edge_attr) > 0 else None
 
         data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
+        
         return data
 
     def __getitem__(self, idx):
         smiles = self.smi_list[idx]
         graph = self.mol_to_graph(smiles)
-        graph.x = (graph.x-self.mean)/self.std
+        
         if graph is None:
             return None
         if self.labels is not None:
@@ -976,7 +900,18 @@ class GraphDataset(Dataset):
     
     
 class Multirelational_GraphDataset(Dataset):
-    def __init__(self, smi_list, labels, max_num_atoms, atom_symbols, hybridization_list, chiraltypes, bonds_list, bond_weight_flag=False, include_self_loop = True, **kwargs):
+    def __init__(self,
+                 smi_list,
+                 labels,
+                 max_num_atoms = 100,
+                 atom_symbols = ['Br', 'Cl', 'F', 'I', 'C', 'N', 'O', 'H', 'S', 'P'],
+                 bonds_list = ['SINGLE', 'AROMATIC', 'DOUBLE', 'TRIPLE'],
+                 hybridization_list=['UNSPECIFIED', 'S', 'SP', 'SP2', 'SP3', 'SP2D', 'SP3D', 'SP3D2', 'OTHER'],
+                 chiraltypes=['CHI_UNSPECIFIED', 'CHI_TETRAHEDRAL_CW', 'CHI_TETRAHEDRAL_CCW'],
+                 bond_weight_flag=False,
+                 include_self_loop = True,
+                 **kwargs
+                 ):
         self.smi_list = smi_list
         self.labels = labels
         self.max_num_atoms = max_num_atoms
@@ -1060,7 +995,6 @@ class Multirelational_GraphDataset(Dataset):
                                                         include_self_loop = self.include_self_loop
                                                         )
         adjacency_tensor = torch.zeros((self.num_relations, self.max_num_atoms, self.max_num_atoms))
-        # adjacency_tensor = torch.stack([torch.eye(self.max_num_atoms, self.max_num_atoms) for _ in range(self.num_relations)])
         adjacency_tensor[:adj_matrix_temp.shape[0], :adj_matrix_temp.shape[1], :adj_matrix_temp.shape[2]] = adj_matrix_temp # A = A + I
         degree_tensor = torch.stack([torch.diag(vector) for vector in adjacency_tensor.sum(axis=1)]) # D = D + I
         
@@ -1297,96 +1231,6 @@ def SmilesDataset_graph_gen(split, dataset, out_path = 'SmilesDataset_graph', me
             
     # return None # SmilesDataset_graph, mean_dict, std_dict
     
-def smi2graphfeature(data,
-                     dataset_mean,
-                     dataset_std,
-                     max_num_atoms,
-                     features_list=['symbol', 'atom_properties', 'hybridization', 'aromaticity', 'ring', 'chirality', 'neighbour_info'], #'3d_descriptors'
-                     padding=True
-                     ):
-        
-    atom_feature_vector = data['atom_feature_vector']
-    try:
-        features = [atom_feature_vector[k] for k in features_list]
-        mean = [dataset_mean[k] for k in features_list]
-        std = [dataset_std[k] for k in features_list]
-    except:
-        raise AttributeError(f'Features should be in: {list(atom_feature_vector.keys())}')
-    
-    try:
-        atom_feature_vector = np.concatenate(features, axis=1)
-        atom_feature_vector = torch.from_numpy(atom_feature_vector)
-    except:
-        raise ValueError(f'Error found in: SMILES - {data['SMILES']}, Features - {atom_feature_vector}')
-    
-    dataset_mean = np.concatenate(mean)
-    dataset_std = np.concatenate(std)
-    if padding: 
-        feature_vector = torch.zeros((max_num_atoms, atom_feature_vector.shape[-1]))
-        feature_vector[:len(atom_feature_vector)] = (atom_feature_vector - dataset_mean)/dataset_std
-    else:
-        atom_feature_vector = (atom_feature_vector - dataset_mean)/dataset_std
-        
-    adjacency_matrix = data['adjacency_matrix']
-    degree_matrix = data['degree_matrix']
-    y  = data['label']
-    
-    return feature_vector, adjacency_matrix, degree_matrix, y
-
-# def preprocessing_init(self, smiles):
-        
-#         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-#         mol_details = load_json(self.mol_details_path)
-#         max_num_atoms = mol_details['max_num_atoms']
-#         atom_symbols = mol_details['atom_symbols']
-#         hybridization_list = mol_details['hybridization_list']
-#         chiraltypes = mol_details['chiraltypes']
-#         bonds_list = mol_details['bonds_list']
-#         bond_weight_flag = False
-#         include_self_loop = True
-#         dataset_mean = load_from_pickle(self.mean_path)
-#         dataset_std = load_from_pickle(self.std_path)
-        
-#         atom_feature_vector = get_atom_info_vector(smiles,
-#                                                 atom_symbols=atom_symbols,
-#                                                 hybridization_list=hybridization_list,
-#                                                 chiraltypes=chiraltypes,
-#                                                 bonds_list=bonds_list
-#                                                 )
-#         adj_matrix_temp = get_multirelational_bond_matrix(smiles,
-#                                                         bonds_list,
-#                                                         weighted_flag=bond_weight_flag,
-#                                                         include_self_loop = include_self_loop
-#                                                         )
-#         adjacency_tensor = torch.zeros((len(bonds_list), max_num_atoms, max_num_atoms))
-#         adjacency_tensor[:adj_matrix_temp.shape[0], :adj_matrix_temp.shape[1], :adj_matrix_temp.shape[2]] = adj_matrix_temp # A = A + I
-#         degree_tensor = torch.stack([torch.diag(vector) for vector in adjacency_tensor.sum(axis=1)]) # D = D + I
-#         adjacency_tensor = adjacency_tensor.unsqueeze(0).to(device)
-#         degree_tensor = degree_tensor.unsqueeze(0).to(device)
-        
-#         features = [atom_feature_vector[k] for k in self.features_list]
-#         mean = [dataset_mean[k] for k in self.features_list]
-#         std = [dataset_std[k] for k in self.features_list]
-
-#         atom_feature_vector = np.concatenate(features, axis=1)
-#         atom_feature_vector = torch.from_numpy(atom_feature_vector)
-
-#         dataset_mean = np.concatenate(mean)
-#         dataset_std = np.concatenate(std)
-
-#         feature_vector = torch.zeros((max_num_atoms, atom_feature_vector.shape[-1]))
-#         feature_vector[:len(atom_feature_vector)] = (atom_feature_vector - dataset_mean)/dataset_std
-#         self.gcn_model, feature_vector= self.gcn_model.to(device), feature_vector.to(device)
-        
-#         with torch.no_grad(): 
-#             input_vector = self.gcn_model.get_features(feature_vector,
-#                                                 adjacency_tensor=adjacency_tensor,
-#                                                 degree_tensor=degree_tensor
-#                                                 )
-#             input_vector = input_vector.detach().cpu().numpy()
-        
-#         return input_vector
-
 class GraphData_from_pickle(Dataset):
     
     def __init__(self,
@@ -1614,6 +1458,45 @@ def feature_representation(dataset,
             labels[i] = targets.cpu().numpy()
             smi_list[i] = dataset.get_smiles(i)
 
+    return features, labels, smi_list
+
+def feature_representation_pyg(dataloader,
+                           model,
+                           smi_list=None,
+                           device='cpu',
+                           input_params = ["x", "edge_index", "batch", "labels"]
+                           ):
+    
+    '''
+    dataset: A dataset with first entry of every datapoint is a SMILES
+    '''
+    
+    # Determine the feature dimension from the model
+    model.eval()
+    feature_dim = model.feature_dim
+    num_samples = len(dataloader.dataset)
+    batch_size = dataloader.batch_size
+    print(f'Number of samples: {num_samples}, Batch size: {batch_size}, Number of batches: {len(dataloader)}')
+
+    # Initialize an array to hold all feature representations
+    features = np.zeros((num_samples, feature_dim))
+    labels = np.zeros((num_samples))
+
+    with torch.no_grad():  
+        for i, data in tqdm(enumerate(dataloader), total=len(dataloader), desc=f'Feature Extraction: '):
+            targets = data.pop('labels').to(device)
+            try:
+                inp_data = {k: data[k].to(device) for k in input_params if (k in data.keys()) and (data[k] is not None)}
+            except:
+                inp_data = {k: [temp_v.to(device) for temp_v in data[k] if temp_v is not None] for k in input_params if k in data.keys()}
+            # print({k: v.shape for k, v in inp_data.items()})
+            outputs = model.get_features(**inp_data)
+
+            # Convert outputs to CPU for NumPy compatibility
+            outputs_np = outputs.cpu().numpy()
+            features[i*batch_size:(i+1)*batch_size] = outputs_np
+            labels[i*batch_size:(i+1)*batch_size] = targets.cpu().numpy()
+            
     return features, labels, smi_list
 
 

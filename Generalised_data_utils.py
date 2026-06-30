@@ -36,6 +36,7 @@ from ordered_set import OrderedSet
 from sklearn.preprocessing import StandardScaler
 from collections import OrderedDict
 from typing import Any, List, Tuple, Union, Callable, Optional, Dict
+from PIL import Image, ImageDraw, ImageFont
 
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestRegressor
@@ -74,7 +75,9 @@ plt.rcParams['font.style'] = 'italic'
 
 __all__ = [
     'show_img',
+    'get_dir',
     'print_results',
+    'print_results_all',
     'list_diff',
     'save_images',
     'matrix2onehot_encode',
@@ -124,6 +127,7 @@ __all__ = [
     'data_split_random_df',
     'selective_range_data_sampling',
     'selective_range_data_split',
+    'data_split_nfold',
     'classify_columns',
     
     'exclude_strings',
@@ -148,6 +152,7 @@ __all__ = [
     'plot_projection_grid_seaborn',
     'plot_3d',
     'plot_2d',
+    'collage_from_dict',
     'customised_plot',
     
     'convex_combination',
@@ -179,6 +184,7 @@ __all__ = [
     'pyfile2bytesarray',
     'get_sub',   
     
+    'make_kfold_indices',
     'df2cleaned_df',
     'merge_list_columns_by_key',
     'remove_highly_correlated_columns',
@@ -197,6 +203,7 @@ __all__ = [
     'dist_hist_comparison',
     'plot_stacked_bars',
     
+    'percentage_within_percent_error',
     'percentage_within_fold_change',
     'geometric_mean_fold_error',
     'min_max',
@@ -204,6 +211,7 @@ __all__ = [
     'test_rf',
     'subset_loader',
     'count_linear_layers',
+    'normalize_data_labels',
     
     'ClassificationResultAnalyzer',
     'TrendAnalyser',
@@ -217,6 +225,28 @@ def show_img(img):
 
     return None
 
+def get_dir(path):
+    return '/'.join(path.split('/')[:-1])
+     
+
+# def print_results(train_results, test_results, val_results):
+    
+#     print('='*70)
+#     print(f"{'& Data':7} & {'R2':7} & {'RMSE':7} & {'MAE':7} & {'PCC':7} & {'GMFE':7} & {'Fold-2':7} & {'Fold-3':7} & {'Fold-5':7}")
+#     print('-'*70)
+#     for k, results in {'& Train': train_results, '& Test': test_results, '& Val': val_results}.items():
+#         print(f"{k:7} & "
+#             f"{str(results['r2']):7} & "
+#             f"{str(results['rmse']):7} & "
+#             f"{str(results['mae']):7} & "
+#             f"{str(results['PCC']):7} & "
+#             f"{str(results['GMFE']):7} & "
+#             f"{str(results['fold2']):7} & "
+#             f"{str(results['fold3']):7} & "
+#             # f"{str(results['fold5']):7} {r"\\"}")
+#             f"{str(results['fold5']):7} \\\\")
+#     print('='*70)
+    
 def print_results(train_results, test_results, val_results):
     
     print('='*70)
@@ -224,36 +254,81 @@ def print_results(train_results, test_results, val_results):
     print('-'*70)
     for k, results in {'& Train': train_results, '& Test': test_results, '& Val': val_results}.items():
         print(f"{k:7} & "
-            f"{str(results['r2']):7} & "
-            f"{str(results['rmse']):7} & "
-            f"{str(results['mae']):7} & "
-            f"{str(results['PCC']):7} & "
-            f"{str(results['GMFE']):7} & "
-            f"{str(results['fold2']):7} & "
-            f"{str(results['fold3']):7} & "
-            # f"{str(results['fold5']):7} {r"\\"}")
-            f"{str(results['fold5']):7} \\\\")
+            f"{results['r2']:7.2f} & "
+            f"{results['rmse']:7.2f} & "
+            f"{results['mae']:7.2f} & "
+            f"{results['PCC']:7.2f} & "
+            f"{results['GMFE']:7.2f} & "
+            f"{results['fold2']:7.2f} & "
+            f"{results['fold3']:7.2f} & "
+            # f"{results['fold5']:7.2f} {r"\\"}")
+            f"{results['fold5']:7.2f} \\\\")
     print('='*70)
     
     
-def print_results_all(results_dict):
+# def print_results_all(results_dict):
     
-    print('='*70)
-    print(f"{'& Data':7} & {'R2':7} & {'RMSE':7} & {'MAE':7} & {'PCC':7} & {'GMFE':7} & {'Fold-2':7} & {'Fold-3':7} & {'Fold-5':7}")
-    print('-'*70)
-    for k, results in results_dict.items():
-        print(f"& {k:7} & "
-            f"{str(results['r2']):7} & "
-            f"{str(results['rmse']):7} & "
-            f"{str(results['mae']):7} & "
-            f"{str(results['PCC']):7} & "
-            f"{str(results['GMFE']):7} & "
-            f"{str(results['fold2']):7} & "
-            f"{str(results['fold3']):7} & "
-            # f"{str(results['fold5']):7} {r"\\"}")
-            f"{str(results['fold5']):7} \\\\")
-    print('='*70)
+#     print('='*70)
+#     print(f"{'& Data':7} & {'R2':7} & {'RMSE':7} & {'MAE':7} & {'PCC':7} & {'GMFE':7} & {'Fold-2':7} & {'Fold-3':7} & {'Fold-5':7}")
+#     print('-'*70)
+#     for k, results in results_dict.items():
+#         print(f"& {k:7} & "
+#             f"{str(results['r2']):7.2f} & "
+#             f"{str(results['rmse']):7.2f} & "
+#             f"{str(results['mae']):7.2f} & "
+#             f"{str(results['PCC']):7.2f} & "
+#             f"{str(results['GMFE']):7.2f} & "
+#             f"{str(results['fold2']):7.2f} & "
+#             f"{str(results['fold3']):7.2f} & "
+#             # f"{str(results['fold5']):7.2f} {r"\\"}")
+#             f"{str(results['fold5']):7.2f} \\\\")
+#     print('='*70)
 
+def print_results_all(results_dict, precision=2):
+
+    if not results_dict:
+        print("No results to display.")
+        return
+
+    # Collect all metric keys dynamically
+    all_metrics = set()
+    for results in results_dict.values():
+        all_metrics.update(results.keys())
+
+    # Preserve a sensible order (optional priority)
+    preferred_order = ['r2', 'rmse', 'mae', 'PCC', 'GMFE']
+    remaining = sorted([m for m in all_metrics if m not in preferred_order])
+    metrics = preferred_order + remaining
+
+    # Filter only those actually present
+    metrics = [m for m in metrics if m in all_metrics]
+
+    # Header
+    header = ["Data"] + metrics
+    col_width = max(7, max(len(h) for h in header))
+
+    print("=" * (len(header) * (col_width + 3)))
+
+    # Print header row
+    header_row = " & ".join(f"{h:>{col_width}}" for h in header)
+    print(header_row)
+
+    print("-" * (len(header) * (col_width + 3)))
+
+    # Print rows
+    for k, results in results_dict.items():
+        row = [k]
+
+        for m in metrics:
+            val = results.get(m, None)
+            if val is None:
+                row.append("NA")
+            else:
+                row.append(f"{val:.{precision}f}")
+
+        print(" & ".join(f"{r:>{col_width}}" for r in row) + " \\\\")
+
+    print("=" * (len(header) * (col_width + 3)))
 
 
 def list_diff(list1, list2):
@@ -288,12 +363,23 @@ def matrix2onehot_encode(matrix):
 
     return one_hot_enc
 
-def datetime_now(path=True):
-    
-    ist = pytz.timezone('Asia/Kolkata')
-    dt = datetime.now(ist).strftime('%Y%m%d_%H_%M_%S' if path else '%Y/%m/%d [%H:%M:%S]')
-    date, time = datetime.now(ist).strftime('Date_%Y_%m_%d'), datetime.now(ist).strftime('Time_%H_%M_%S')
-    
+def datetime_now(path: bool = True):
+    """
+    Returns current datetime in Asia/Kolkata timezone.
+
+    Returns:
+        dt   : full formatted datetime string
+        date : YYYY_MM_DD
+        time : HH_MM_SS
+    """
+    ist = pytz.timezone("Asia/Kolkata")
+
+    # single timestamp (IMPORTANT)
+    now = datetime.now(ist)
+    dt = now.strftime("%Y%m%d_%H_%M_%S" if path else "%Y/%m/%d [%H:%M:%S]")
+    date = now.strftime("%Y_%m_%d")
+    time = now.strftime("%H_%M_%S")
+
     return dt, date, time
 
 def execution_time(func, *args):
@@ -710,6 +796,7 @@ def save2pickle(file_: object, filepath: str, compress: bool = False):
     Save Python object to a pickle file.
     If compress=True, saves in gzip format (regardless of extension).
     """
+    _ = create_folder(filepath[:-len(filepath.split('/')[-1])])
     if compress or filepath.endswith(".gz"):
         with gzip.open(filepath, "wb") as fp:
             pickle.dump(file_, fp, protocol=pickle.HIGHEST_PROTOCOL)
@@ -761,12 +848,12 @@ def save_dict_csv_pandas(dict_name, save_filename='temp_save_filename.csv'):
 
 
 
-def save_dict_pickle(dict_name, save_filename='temp_save_filename.pkl', protocol=4):
+def save_dict_pickle(dict_, save_filename='temp_save_filename.pkl', protocol=4):
 
     # create folder (if not) 
     _ = create_folder(save_filename[:-len(save_filename.split('/')[-1])])
     with open(save_filename,'wb') as f:
-        pickle.dump(dict_name, f, protocol=protocol)
+        pickle.dump(dict_, f, protocol=protocol)
 
 
 
@@ -916,8 +1003,13 @@ def data_partition_random_indices(num_data_points, train_ratio=0.5, val_ratio=0.
 
     return idx_train, idx_val, idx_test
 
-
-def data_split_random_df(df, ratios=(0.7, 0.2, 0.1), labels=None, seed=40, split_column = 'Data_Split', index=1):
+def data_split_random_df(df,
+                         ratios=(0.7, 0.2, 0.1),
+                         labels=('Tr', 'Te', 'Val'),
+                         seed=40,
+                         data_split_col_name='Data_Split',
+                         index=1
+                         ):
     """
     Randomly split a DataFrame into n partitions based on given ratios.
     
@@ -945,29 +1037,24 @@ def data_split_random_df(df, ratios=(0.7, 0.2, 0.1), labels=None, seed=40, split
         labels = [f"Split_{i+1}" for i in range(n)]
     elif len(labels) != n:
         raise ValueError("Length of labels must match number of ratios")
-    
-    # Shuffle indices
-    rng = np.random.default_rng(seed)
-    idx = rng.permutation(len(df))
-    
-    # Compute partition sizes
-    sizes = (np.array(ratios) * len(df)).astype(int)
-    
-    # Adjust last partition to cover rounding errors
-    sizes[-1] = len(df) - sizes[:-1].sum()
-    
-    # Assign partitions
+
     df = df.copy()
-    df.insert(index, split_column, 'NaN')
+    rng = np.random.default_rng(seed)
+    perm = rng.permutation(len(df))
+
+    sizes = (np.array(ratios) * len(df)).astype(int)
+    sizes[-1] = len(df) - sizes[:-1].sum()  # fix rounding
+
+    df.insert(index, data_split_col_name, '')
+
     start = 0
     for size, label in zip(sizes, labels):
         end = start + size
-        df.loc[df.index.isin(idx[start:end]), split_column] = label
+        split_idx = perm[start:end]
+        df.loc[df.index[split_idx], data_split_col_name] = label
         start = end
-    
+
     return df
-
-
 
 # def data_split_random_df(df, ratio=(0.5, 0.3, 0.2)):
     
@@ -1037,7 +1124,7 @@ def selective_range_data_sampling(df, ticks: list, column='logp', frac=0.7, rand
     return mod_df, summary_df
     
     
-def selective_range_data_split(df, ticks, column='logp', ratio=(0.5, 0.3, 0.2), random_state=1, col_loc=2):
+def selective_range_data_split(df, ticks, column='logp', ratio=(0.5, 0.3, 0.2), random_state=1, col_loc=2, data_split_col_name = 'Data_Split'):
     
     """
     Splits the data into train, val, and test sets from defined value ranges in a specified column.
@@ -1085,13 +1172,37 @@ def selective_range_data_split(df, ticks, column='logp', ratio=(0.5, 0.3, 0.2), 
     val_idx_all += list(val)
     test_idx_all += list(test)
     
-    if 'Data_Split' not in df.columns:
-        df.insert(col_loc, 'Data_Split', ['Other']*len(df))
+    if data_split_col_name not in df.columns:
+        df.insert(col_loc, data_split_col_name, ['Other']*len(df))
     
-    df.loc[df.index.isin(train_idx_all), 'Data_Split'] = 'Tr'
-    df.loc[df.index.isin(test_idx_all), 'Data_Split'] = 'Te'
-    df.loc[df.index.isin(val_idx_all), 'Data_Split'] = 'Val'
+    df.loc[df.index.isin(train_idx_all), data_split_col_name] = 'Tr'
+    df.loc[df.index.isin(test_idx_all), data_split_col_name] = 'Te'
+    df.loc[df.index.isin(val_idx_all), data_split_col_name] = 'Val'
 
+    return df
+
+def data_split_nfold(df: pd.DataFrame,
+                     n_folds: List[int]|int,
+                     data_split_col_idx = 3,
+                     data_split_col_name: str = 'Data_Split',
+                     ):
+    
+    df = df.copy()
+    n_data = len(df)
+    
+    if isinstance(n_folds, int):
+        n_folds = [n_folds]
+    for n_fold in n_folds:
+        random_idx = np.random.permutation(np.arange(n_data))
+        n_fold_datapts = n_data//n_fold
+        colm = f'{data_split_col_name}_CV{(n_fold)}'
+        df.insert(data_split_col_idx, colm, 'CV_1')
+
+        for i in range(n_fold):
+            idx = random_idx[i*n_fold_datapts: (i+1)*n_fold_datapts]
+            mask = df.index.isin(idx)
+            df.loc[mask, colm] = f'CV_{(i+1)}'
+            
     return df
 
 
@@ -1419,51 +1530,74 @@ def get_colors(colours = ['red', 'blue', 'green', 'violet', 'pink', 'orange', 'g
         
     return color_iter
 
-def apply_reductions(df: pd.DataFrame, value_col: str, use_lda: bool = False) -> Dict[str, np.ndarray]:
+
+def apply_reductions(df: pd.DataFrame | np.ndarray,
+                    value_col: str | int | None = None,
+                    proj_names: List[str] = ["PCA", "t-SNE", "UMAP", "Isomap", "FactorAnalysis", "MDS", "TruncatedSVD", "KernelPCA"],
+                    use_lda: bool = False
+                    ) -> Tuple[Dict[str, np.ndarray], Dict[str, object], np.ndarray]:
     """
     Apply multiple dimensionality reduction techniques (2D projection).
 
     Args:
         df (pd.DataFrame): Input dataframe with features + value column.
+        proj_names (list): Required projections.
         value_col (str): Column used for coloring (can be discrete or continuous).
         use_lda (bool): Whether to include LDA (requires discrete labels).
-
-    Returns:
-        Dict[str, np.ndarray]: Dictionary with method names as keys and 2D projections as values.
-        np.ndarray: Values of the coloring column.
+    Returns: 
+        Output: (projections, trained, values)
+        projections: dict {method -> (n,2) array}
+        trained_reducers: dict {method -> fitted reducer object}
+        values: colour/label vector (or None)
     """
-    
-    X = df.drop(columns=[value_col]).values
-    values = df[value_col].values
+
+    # --- Extract X and values ---
+    if value_col is not None:
+        if isinstance(df, pd.DataFrame):
+            values = df[value_col].to_numpy()
+            X = df.drop(columns=[value_col]).to_numpy()
+        else:
+            values = df[:, value_col]
+            X = np.delete(df, value_col, axis=1)
+    else:
+        values = None
+        X = df.to_numpy() if isinstance(df, pd.DataFrame) else df
 
     reducers = {
-        "UMAP": UMAP(n_components=2, random_state=42),
-        "PCA": PCA(n_components=2, random_state=42),
-        "Isomap": Isomap(n_components=2),
-        "FactorAnalysis": FactorAnalysis(n_components=2, random_state=42),
-        "MDS": MDS(n_components=2, random_state=42, n_init=1, max_iter=300),
-        "t-SNE": TSNE(n_components=2, random_state=42, init="pca"),
-        "TruncatedSVD": TruncatedSVD(n_components=2, random_state=42),
-        "KernelPCA": KernelPCA(n_components=2, kernel="rbf", random_state=42),
-    }
-    
-    if use_lda:
-        try:
-            reducers["LDA"] = LDA(n_components=2)
-        except Exception as e:
-            print("⚠️ LDA skipped:", e)
+            "PCA": PCA(n_components=2, random_state=42),
+            "UMAP": UMAP(n_neighbors=10, min_dist=1., n_components=2, metric="cosine", random_state=42),
+            "Isomap": Isomap(n_components=2),
+            "FactorAnalysis": FactorAnalysis(n_components=2, random_state=42),
+            "MDS": MDS(n_components=2, random_state=42, n_init=1, max_iter=300),
+            "t-SNE": TSNE(n_components=2, random_state=42, init="pca"),
+            "TruncatedSVD": TruncatedSVD(n_components=2, random_state=42),
+            "KernelPCA": KernelPCA(n_components=2, kernel="rbf", random_state=42),
+        }
 
-    results = {}
-    for name, reducer in reducers.items():
+    if use_lda and values is not None:
+        reducers["LDA"] = LDA(n_components=2)
+
+    projections = {}
+    trained = {}
+
+    for name in proj_names:
+        if name not in reducers:
+            continue
+
         try:
+            reducer = reducers[name]
             if name == "LDA":
-                results[name] = reducer.fit_transform(X, values)
+                Z = reducer.fit_transform(X, values)
             else:
-                results[name] = reducer.fit_transform(X)
+                Z = reducer.fit_transform(X)
+
+            projections[name] = Z
+            trained[name] = reducer
+
         except Exception as e:
             print(f"⚠️ {name} failed: {e}")
 
-    return results, values
+    return projections, trained, values
 
 
 def plot_reductions(results: dict, values: np.ndarray,
@@ -1637,6 +1771,7 @@ def plot_3d(
     z_label='Z',
     fig_size=(8, 8),
     view_init=(20, 20),
+    titlefontsize=30,
     names=None,  # list of strings
     X=None, Y=None, Z=None  # coords for annotation
 ):
@@ -1711,32 +1846,64 @@ def plot_3d(
             ax.text(x, y, z, name)
 
     # Set labels and view
-    ax.set_title(title, fontsize=16, color='darkgreen')
-    ax.set_xlabel(x_label, labelpad=10, fontsize=14)
-    ax.set_ylabel(y_label, labelpad=10, fontsize=14)
-    ax.set_zlabel(z_label, labelpad=10, fontsize=14)
+    labelsfontsize = titlefontsize - 5
+    labelpad=30
+    ax.set_title(title, fontsize=titlefontsize, color='darkgreen', fontweight='bold')
+    ax.set_xlabel(x_label, labelpad=labelpad, fontsize=labelsfontsize)
+    ax.set_ylabel(y_label, labelpad=labelpad, fontsize=labelsfontsize)
+    ax.set_zlabel(z_label, labelpad=labelpad, fontsize=labelsfontsize)
+    
+    tickfontsize = titlefontsize - 8
+    tickpad = 8  # increase if fonts are large
+    ax.tick_params(axis='x', labelsize=tickfontsize, pad=tickpad)
+    ax.tick_params(axis='y', labelsize=tickfontsize, pad=tickpad)
+    ax.tick_params(axis='z', labelsize=tickfontsize, pad=tickpad + 4)
     ax.view_init(elev=view_init[0], azim=view_init[1])
     plt.tight_layout()
     plt.show()
 
+def fig_to_image(fig, dpi=100):
+    import io
+    from PIL import Image
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
+    buf.seek(0)
+
+    img = Image.open(buf)
+
+    # --- SAFETY FIX ---
+    # Ensure all metadata values are strings
+    if hasattr(img, "info") and isinstance(img.info, dict):
+        img.info = {k: str(v) for k, v in img.info.items()}
+
+    return img
 
 
 def plot_2d(matrices=None,
-            colours=None,
+            colours=True,
             title='2D Scatter Plot',
             x_label='X',
             y_label='Y',
+            plot_type='scatter', # 'continuous'
             fig_size=(8, 8),
             names=None,
             X=None,
             Y=None,
             scatter_labels = False,
             title_fontsize=25,
+            linewidth=2,
+            markers = ['o', '^', 'd', 's', 'p', 'X', 'v', '<', '>', 'h', '+', '*', 'x'],
             xticks = False,
             yticks = False,
             xtickslabels = False,
             ytickslabels = False,
-            legend_loc = 'upper center',
+            x_lim = None,
+            y_lim = None,
+            legend_loc = None,#'upper center',
+            plot_legends = True,
+            savepath='',
+            return_img=False,
             ):
     """
     Plot 1D or 2D matrices as 2D scatter plots.
@@ -1752,15 +1919,17 @@ def plot_2d(matrices=None,
         X (np.ndarray): X-coordinates for annotations (if different from matrices).
         Y (np.ndarray): Y-coordinates for annotations (if different from matrices).
     """
-
     if matrices is None:
         raise ValueError("The 'matrices' argument must be provided and non-empty.")
     if not isinstance(matrices, list):
         matrices = [matrices]
+        
+    markers = markers*int(np.ceil(len(matrices)/len(markers)))
+    markers = iter(markers)
 
     # Prepare color palette
     base_colors = list(OrderedDict.fromkeys(
-        ['red', 'blue', 'green', 'violet', 'pink', 'orange', 'gray', 'yellow'] +
+        ['red', 'blue', 'green', 'maroon', 'magenta', 'darkorchid', 'darkorange', 'darkmagenta', 'brown', 'pink', 'gray', 'yellow'] +
         list(mcolors.TABLEAU_COLORS) +
         list(mcolors.XKCD_COLORS) +
         list(mcolors.CSS4_COLORS)
@@ -1800,11 +1969,23 @@ def plot_2d(matrices=None,
         else:
             print(f"Skipping matrix at index {idx}: not 1D or 2D")
             continue
-
-        if scatter_labels:
-            plt.scatter(x_vals, y_vals, color=next(color_iter), label=scatter_labels[idx], s = title_fontsize/1)
+        
+        if plot_type == 'scatter':
+            if scatter_labels:
+                plt.scatter(x_vals, y_vals, color=next(color_iter), label=scatter_labels[idx], s = title_fontsize*5, marker=next(markers), alpha=1.0)
+            else:
+                plt.scatter(x_vals, y_vals, color=next(color_iter), label=f"Set {idx+1}", s = title_fontsize*5, marker=next(markers), alpha=1.0)
         else:
-            plt.scatter(x_vals, y_vals, color=next(color_iter), label=f"Set {idx+1}", s = title_fontsize/1)
+            if scatter_labels:
+                plt.plot(x_vals, y_vals, color=next(color_iter), label=scatter_labels[idx], linestyle='-', linewidth=linewidth, marker=next(markers), markersize = 5*linewidth)
+            else:
+                plt.plot(x_vals, y_vals, color=next(color_iter), label=f"Set {idx+1}", linestyle='-', linewidth=linewidth, marker=next(markers), markersize = 5*linewidth)
+
+    # xmin_, xmax_ = plt.xlim()
+    # x_ = np.linspace(xmin_, xmax_, 200)
+    # # ±0.5 offset lines
+    # plt.plot(x_, x_ + 0.5, color="green", linestyle="--", linewidth=2, label="±0.5 interval")
+    # plt.plot(x_, x_ - 0.5, color="green", linestyle="--", linewidth=2)
 
     # Annotations (if applicable)
     if names:
@@ -1823,21 +2004,174 @@ def plot_2d(matrices=None,
             for name, x, y in zip(names, X, Y):
                 plt.annotate(name, (x, y), textcoords="offset points", xytext=(0, -10), ha='center')
 
-    if xticks:
+    if isinstance(xticks, (np.ndarray, list, tuple)):
         xticks = list(xticks)
-        plt.xticks(xticks, xtickslabels if len(xticks) == len(xtickslabels) else xticks)
-    if yticks:
+        if isinstance(xtickslabels, (np.ndarray, list, tuple)):
+            plt.xticks(xticks, xtickslabels if len(xticks) == len(xtickslabels) else xticks)
+        else:
+            plt.xticks(xticks, xticks)
+    if isinstance(yticks, (np.ndarray, list, tuple)):
         yticks = list(yticks)
-        plt.yticks(yticks, ytickslabels if len(yticks) == len(ytickslabels) else yticks)
+        if isinstance(ytickslabels, (np.ndarray, list, tuple)):
+            plt.yticks(yticks, ytickslabels if len(yticks) == len(ytickslabels) else yticks)
+        else:
+            plt.yticks(yticks, yticks)
+
     # Axes labels
     plt.xlabel(x_label, labelpad=10, fontsize=title_fontsize-3)
     plt.ylabel(y_label, labelpad=10, fontsize=title_fontsize-3)
     plt.xticks(fontsize=title_fontsize-5)
     plt.yticks(fontsize=title_fontsize-5)
-    plt.legend(fontsize=title_fontsize-8, loc=legend_loc, frameon=True)
-    plt.tight_layout()
-    plt.show()
 
+    if x_lim is not None:
+        plt.xlim(x_lim)
+    if y_lim is not None:
+        plt.ylim(y_lim)
+    
+    if plot_legends:
+        plt.legend(fontsize=title_fontsize-8, loc=legend_loc, frameon=True)
+    plt.tight_layout()
+    
+    if savepath:
+        create_folder(get_dir(savepath))
+        plt.savefig(savepath,  dpi=300)
+        plt.close()
+        print(f'Image saved in: {savepath}')
+    elif return_img:
+        return fig_to_image(fig, dpi=300)
+    else:
+        plt.show()
+
+
+def collage_from_dict(img_dict, save_path=None, cols=3, padding=10,
+                      bg_color=(255,255,255), title=None, title_height=80):
+
+    names = list(img_dict.keys())
+    imgs = list(img_dict.values())
+
+    n = len(imgs)
+    rows = math.ceil(n / cols)
+
+    # assume same image size
+    w, h = imgs[0].size
+
+    # compute width first (needed for font scaling)
+    collage_w = cols * w + padding * (cols + 1)
+
+    # ---- Title handling ----
+    y_offset = 0
+    if title:
+        font_size = collage_w // 80  # BIG title
+
+        try:
+            font = ImageFont.truetype("DejaVuSans-Bold.ttf", font_size)
+        except:
+            raise RuntimeError("Install DejaVuSans-Bold.ttf on your system")
+
+        # adjust title height based on font
+        bbox = (0, 0, 0, 0)
+        while True:
+            bbox = ImageDraw.Draw(Image.new("RGB", (10,10))).textbbox((0, 0), title, font=font)
+            text_w = bbox[2] - bbox[0]
+
+            if text_w <= collage_w * 0.95:
+                break
+
+            font_size -= 2
+            font = ImageFont.truetype("DejaVuSans-Bold.ttf", font_size)
+
+        text_h = bbox[3] - bbox[1]
+        title_height = max(title_height, text_h + 20)
+
+        y_offset = title_height
+    else:
+        font = None
+
+    # ---- Final canvas size ----
+    collage_h = rows * h + padding * (rows + 1) + y_offset
+
+    collage = Image.new("RGB", (collage_w, collage_h), bg_color)
+    draw = ImageDraw.Draw(collage)
+
+    # ---- Draw title ----
+    if title:
+        bbox = draw.textbbox((0, 0), title, font=font)
+        text_w = bbox[2] - bbox[0]
+        text_h = bbox[3] - bbox[1]
+
+        x_text = (collage_w - text_w) // 2
+        y_text = (title_height - text_h) // 2
+
+        draw.text((x_text, y_text), title, fill=(0, 0, 0), font=font)
+
+        # separator line
+        draw.line((0, title_height, collage_w, title_height), fill=(0,0,0), width=2)
+
+    # ---- Paste images ----
+    for i, (name, img) in enumerate(img_dict.items()):
+        r = i // cols
+        c = i % cols
+
+        x = padding + c * (w + padding)
+        y = padding + r * (h + padding) + y_offset
+
+        collage.paste(img, (x, y))
+
+        draw.text((x + 5, y + 5), name, fill=(0,0,0))
+
+    if save_path:
+        collage.save(save_path)
+
+    return collage
+ 
+# def collage_from_dict(img_dict, save_path=None, cols=3, padding=10, bg_color=(255,255,255)):
+#     """
+#     Create a collage from a dictionary of PIL images.
+
+#     Parameters
+#     ----------
+#     img_dict : dict[str, PIL.Image]
+#     save_path : str
+#     cols : int
+#         number of columns in collage
+#     padding : int
+#         space between images
+#     bg_color : tuple
+#         background color
+#     """
+
+#     names = list(img_dict.keys())
+#     imgs = list(img_dict.values())
+
+#     n = len(imgs)
+#     rows = math.ceil(n / cols)
+
+#     # assume same image size
+#     w, h = imgs[0].size
+
+#     collage_w = cols * w + padding * (cols + 1)
+#     collage_h = rows * h + padding * (rows + 1)
+
+#     collage = Image.new("RGB", (collage_w, collage_h), bg_color)
+
+#     draw = ImageDraw.Draw(collage)
+
+#     for i, (name, img) in enumerate(img_dict.items()):
+
+#         r = i // cols
+#         c = i % cols
+
+#         x = padding + c * (w + padding)
+#         y = padding + r * (h + padding)
+
+#         collage.paste(img, (x, y))
+
+#         # optional label
+#         draw.text((x + 5, y + 5), name, fill=(0,0,0))
+#     if save_path is not None:
+#         collage.save(save_path)
+
+#     return collage 
 
 def customised_plot(matrix, PCA = True, Kmeans = False, plot = True, view_init = [30, 30]):
 
@@ -2383,6 +2717,52 @@ def del_folder(path, folder_name = 'abc'):
                     i += 1
                     print(f'Folder: {folder_path} deleted.')
     print(f'Deletion Complete:\n {i} folders deleted')
+    
+
+def make_kfold_indices(n, k, shuffle=True, seed=42):
+    """
+    Generate balanced k-fold indices for arbitrary-sized data.
+
+    Parameters
+    ----------
+    data : list or array-like
+        Your dataset (only its length is used).
+    k : int
+        Number of folds.
+    shuffle : bool
+        Whether to shuffle before splitting.
+    seed : int
+        Random seed for reproducibility.
+
+    Returns
+    -------
+    folds : list of numpy arrays
+        folds[i] contains the indices for validation fold i.
+    """
+
+    if isinstance(n, list):
+        indices = n
+        n = len(n)
+    else:
+        indices = np.arange(n)
+
+    if shuffle:
+        rng = np.random.default_rng(seed)
+        rng.shuffle(indices)
+
+    # Balanced fold sizes
+    base = n // k
+    remainder = n % k
+
+    fold_sizes = [base + 1 if i < remainder else base for i in range(k)]
+
+    folds = {}
+    start = 0
+    for i, size in enumerate(fold_sizes):
+        folds[f'CV-{i+1}'] = indices[start:start + size]
+        start += size
+
+    return folds
 
 def df2cleaned_df(df: pd.DataFrame,
                   key_col: str,
@@ -3427,7 +3807,7 @@ def plot_hist_compair(data_list1: List[np.ndarray | list],
     else:
         plt.show()
         
-        
+    
 # def plot_multiple_hist(
 #     data_list1: List[np.ndarray | list],
 #     subplot_title: List[str] = None,
@@ -3833,7 +4213,32 @@ def plot_stacked_bars(df, target_col, feature_cols='all', class_order=None,
         plt.xticks(rotation=rotation)
         plt.tight_layout()
         plt.show()
+  
 
+def percentage_within_percent_error(y_true, y_pred, percent=10, transform_func=lambda x: x):
+    """
+    Calculate the percentage of repeated measurements within a given percentage of error.
+    For example: if y is the true value and p is the percentage then:
+        To find the number of datapoints within (y - yp/100, y + yp/100).
+
+    Parameters:
+    - y_true (list or numpy array): The true experimental values.
+    - y_pred (list or numpy array): The predicted experimental values.
+    - percent (float): The allowable percentage of error. Sould be between [0, 100]. 
+
+    Returns:
+    - float: Percentage of values within the specified error percentage.
+    """
+    y_true = transform_func(np.asarray(y_true, dtype=float))
+    y_pred = transform_func(np.asarray(y_pred, dtype=float))
+    
+    # use magnitude for percentage band
+    scale = np.abs(y_true)
+    interval_hi = y_true + scale * (percent / 100)
+    interval_lo = y_true - scale * (percent / 100)
+    within = (interval_lo <= y_pred) & (y_pred <= interval_hi)
+
+    return round(100 * np.mean(within), 2)
 
 def percentage_within_fold_change(y_true, y_pred, fold=2, transform_func=lambda x: x):
     """
@@ -3864,43 +4269,57 @@ def percentage_within_fold_change(y_true, y_pred, fold=2, transform_func=lambda 
     
     return percentage, max_, min_
 
-def geometric_mean_fold_error(y_true, y_pred, transform_func=lambda x: x):
-    
+def geometric_mean_fold_error(
+    y_true, 
+    y_pred, 
+    transform_func=lambda x: x,
+    use_log_domain=False,
+    eps=1e-12
+):
     """
-    Calculate Geometric Mean Fold Error (GMFE).
+    Compute Geometric Mean Fold Error (GMFE).
 
-    Parameters:
-    - y_true: array-like of true values
-    - y_pred: array-like of predicted values
+    Parameters
+    ----------
+    y_true : array-like
+    y_pred : array-like
+    transform_func : callable, optional
+        Transformation applied before computation.
+    use_log_domain : bool, optional
+        If True, assumes inputs are already in log scale (e.g., pKa, logP).
+        GMFE = 10 ** MAE.
+    eps : float
+        Small constant to avoid division by zero.
 
-    Returns:
-    - GMFE: float
+    Returns
+    -------
+    gmfe : float
+    invalid : int
+        Number of excluded samples
     """
-    y_true = transform_func(np.array(y_true, dtype=float))
-    y_pred = transform_func(np.array(y_pred, dtype=float))
-    
-    # Avoid division by zero
-    if np.any(y_true <= 0):
-        idx = np.where(y_true <= 0)[0]
-        print(f"Total: {len(idx)} with Index: {idx} contains non-positive numbers. y_true must not contain non-positive numbers.")
-    if np.any(y_pred <= 0):
-        idx = np.where(y_pred <= 0)[0]
-        print(f"Total: {len(idx)} with Index: {idx} contains non-positive numbers. y_pred must not contain non-positive numbers.")
 
-    valid = ((y_true > 0) & (y_pred > 0)) or ((y_true < 0) & (y_pred < 0))
-    invalid = len(y_true) - len(y_pred[valid])
-    
-    # log_fold_errors = np.abs(np.log10(y_pred[valid] / y_true[valid]))
-    # gmfe = 10**(np.mean(log_fold_errors))
-    
-    gmfe = 10**mean_absolute_error(y_true=y_true, y_pred=y_pred)
+    y_true = transform_func(np.asarray(y_true, dtype=float))
+    y_pred = transform_func(np.asarray(y_pred, dtype=float))
+
+    # Case 1: Already log-transformed values (preferred in chemistry)
+    if use_log_domain:
+        mae = np.mean(np.abs(y_pred - y_true))
+        return 10 ** mae, 0
+
+    # Case 2: Raw values → use absolute ratio
+    valid = (np.abs(y_true) > eps) & (np.abs(y_pred) > eps)
+
+    invalid = np.sum(~valid)
     if invalid > 0:
-        warnings.warn(f"Warning: {invalid} values were ignored due to zero or negative values.")
-        print(f"{invalid} invalid (non-positive) entries found and excluded from log10 MAE calculation.")
-    
+        warnings.warn(f"{invalid} values ignored due to near-zero entries.")
+
+    y_true_valid = np.abs(y_true[valid])
+    y_pred_valid = np.abs(y_pred[valid])
+
+    log_fold_errors = np.abs(np.log10(y_pred_valid / y_true_valid))
+    gmfe = 10 ** np.mean(log_fold_errors)
+
     return gmfe, invalid
-
-
 
 def min_max(y_true, y_pred, range_list, eps = 0.5, transform_func=lambda x: x):
     
@@ -3954,12 +4373,15 @@ def gmfe(y_true, y_pred, eps=1e-8, base=10, transform_func=lambda x: x):
 
     # GMFE formula
     gmfe_value = base ** (np.mean(np.abs(logs)))
+    
     return gmfe_value
 
 def regression_test_metrics(y_true: np.ndarray[float] | List[float],
                  y_pred: np.ndarray[float] | List[float],
                  transform_func=lambda x: x,
-                 fold_transform_fn=lambda x:x
+                 fold_transform_fn=lambda x:x,
+                 use_log_domain_gmfe=False,
+                 decimals=2
             ) -> OrderedDict[str, float]:
     
     '''
@@ -3983,21 +4405,27 @@ def regression_test_metrics(y_true: np.ndarray[float] | List[float],
     mae_test = mean_absolute_error(y_true, y_pred)
     r2_val_test = r2_score(y_true, y_pred)
     pcc = np.corrcoef(y_true, y_pred,)[0, 1]
+    
     fold2, _, _ = percentage_within_fold_change(y_true=y_true, y_pred=y_pred, fold=2, transform_func=fold_transform_fn)
     fold3, _, _ = percentage_within_fold_change(y_true=y_true, y_pred=y_pred, fold=3, transform_func=fold_transform_fn)
+    # fold2 = percentage_within_percent_error(y_true=y_true, y_pred=y_pred, percent=10)
+    # fold3 = percentage_within_percent_error(y_true=y_true, y_pred=y_pred, percent=20)
     fold5, _, _ = percentage_within_fold_change(y_true=y_true, y_pred=y_pred, fold=5, transform_func=fold_transform_fn)
-    _gmfe = gmfe(y_true=y_true, y_pred=y_pred, transform_func=fold_transform_fn)
+    _gmfe, _ = geometric_mean_fold_error(y_true=y_true, y_pred=y_pred, transform_func=fold_transform_fn, use_log_domain=use_log_domain_gmfe)
+    # _gmfe = gmfe(y_true=y_true, y_pred=y_pred, transform_func=fold_transform_fn)
     
     
-    results = OrderedDict({'mse':round(mse_test, 2),
-                           'r2':round(r2_val_test, 2),
-                           'rmse':round(rmse_test, 2),
-                           'mae':round(mae_test, 2),
-                           'PCC':round(pcc, 2),
-                           'GMFE':round(_gmfe, 2),
-                           'fold2':round(fold2, 2),
-                           'fold3':round(fold3, 2),
-                           'fold5':round(fold5, 2),
+    results = OrderedDict({'mse':round(mse_test, decimals),
+                           'r2':round(r2_val_test, decimals),
+                           'rmse':round(rmse_test, decimals),
+                           'mae':round(mae_test, decimals),
+                           'PCC':round(pcc, decimals),
+                           'GMFE':round(_gmfe, decimals),
+                           'fold2':round(fold2, decimals),
+                           'fold3':round(fold3, decimals),
+                        #    '10%':round(fold2, decimals),
+                        #    '20%':round(fold3, decimals),
+                           'fold5':round(fold5, decimals),
                            })
     
     return results
@@ -4178,6 +4606,36 @@ def count_linear_layers(model: nn.Module) -> Tuple[int, List[int]]:
     linear_layers.append(last_layer.out_features)
     
     return linear_layer_count, linear_layers
+
+def normalize_data_labels(X, y, feature_normalised=True, label_normalised=True):
+    ''' Normalizes the features and labels using StandardScaler.
+        If feature_normalised or label_normalised is False, it will not normalize the respective data and will set mean to 0 and scale to 1.
+        
+        Returns:
+            - Normalized X and y
+            - Scaler objects for features and labels (useful for inverse transformation)
+            - Output: X, y, scaler_feats, scaler_labels
+    '''
+    
+    scaler_feats = StandardScaler()
+    if feature_normalised:
+        
+        scaler_feats = scaler_feats.fit(X)
+    else:
+        scaler_feats.mean_ = 0
+        scaler_feats.scale_ = 1
+        
+    scaler_labels = StandardScaler()
+    if label_normalised:
+        scaler_labels = scaler_labels.fit(y.reshape(-1, 1))
+    else:
+        scaler_labels.mean_ = 0
+        scaler_labels.scale_ = 1
+        
+    X = scaler_feats.transform(X)
+    y = scaler_labels.transform(y.reshape(-1, 1)).flatten()
+    
+    return X, y, scaler_feats, scaler_labels
 
 
 class ClassificationResultAnalyzer:

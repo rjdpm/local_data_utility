@@ -15,6 +15,10 @@ from transformers import ViTModel, ViTFeatureExtractor
 from transformers import RobertaModel, RobertaPreTrainedModel
 from transformers import AutoModel, AutoConfig
 
+from torch_geometric.nn import GINConv as PyG_GINConv, global_add_pool
+from torch_geometric.nn import global_add_pool
+from torch_geometric.nn import LayerNorm
+
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from Generalised_data_utils import auto_repr, collect_class_definitions, check_tensor
 
@@ -47,6 +51,11 @@ __all__ = [
     'GCN',
     'GCN_Connected',
     'MRGCN',
+    'GINConv',
+    'GIN',
+    'GIN_FU',
+    'GIN_SINKHORN',
+    'GIN_PyG',
     'ChemBERTa',
     'ChemBERTaRegressorroberta',
     'ChemBERTaRegressor',
@@ -1519,7 +1528,10 @@ class GCN(nn.Module):
     def __repr__(self):
         return auto_repr(self)
         
-    def get_features(self, x, adjacency_matrices, degree_matrices):
+    # ------------------------------------------------------------------
+    # GCN feature extraction
+    # ------------------------------------------------------------------
+    def get_node_embeddings(self, x, adjacency_matrices, degree_matrices):
         """
         Task:
             Extract GCN-based molecular features using adjacency and degree info.
@@ -1546,7 +1558,7 @@ class GCN(nn.Module):
         
         return x
     
-    def input2repr(self, x, layers, layer_norms, dropout):
+    def apply_fc_layers(self, x, layers, layer_norms, dropout):
         """
         Task:
             Apply a series of linear layers with normalization and dropout.
@@ -1568,6 +1580,25 @@ class GCN(nn.Module):
                     x = layers[i](x)
                 
         return x
+    
+    # ------------------------------------------------------------------
+    # Pooling
+    # ------------------------------------------------------------------
+    def pool_graph(self, node_embeddings, mask=None):
+        """
+        Mean pooling with optional masking.
+
+        node_embeddings : Tensor [B, N, F]
+        mask : Tensor [B, N] (1 for valid nodes, 0 for padding)
+        """
+        if mask is None:
+            return node_embeddings.mean(dim=1)
+
+        mask = mask.unsqueeze(-1).float()
+        summed = (node_embeddings * mask).sum(dim=1)
+        denom = mask.sum(dim=1).clamp(min=1.0)
+
+        return summed / denom
 
     def forward(self, x, adjacency_matrices, degree_matrices):
         """
@@ -1581,12 +1612,12 @@ class GCN(nn.Module):
         Outputs:
             - Tensor: Graph-level prediction [batch_size, output_dim]
         """
-        x = self.get_features(x, adjacency_matrices, degree_matrices)
+        x = self.get_node_embeddings(x, adjacency_matrices, degree_matrices)
         x = self.fc_conn(x)
-        x = self.input2repr(x, self.fc_layers, self.fc_layer_norms, self.dropout)
+        x = self.apply_fc_layers(x, self.fc_layers, self.fc_layer_norms, self.dropout)
         
         return x.squeeze()
-    
+        
     
 class GCN_Connected(nn.Module):
     """
@@ -1601,7 +1632,13 @@ class GCN_Connected(nn.Module):
     Outputs:
         - Tensor: Combined representation
     """
-    def __init__(self, list_dims_gcn, list_dims_fc, dropout, type_='concat'):
+    def __init__(self,
+                 list_dims_gcn,
+                 list_dims_fc,
+                 dropout,
+                 external_input_dim,
+                 n_fc_external = 1,
+                 type_='concat'):
         super().__init__()
         self.class_def = inspect.getsource(self.__class__)
         self.network_pyfile = network_pyfile
@@ -1610,16 +1647,21 @@ class GCN_Connected(nn.Module):
         # GCN layers with LayerNorms for stability, except on last GCN layer
         self.gcn_layers = nn.ModuleList([GCNLayer(list_dims_gcn[i], list_dims_gcn[i+1]) for i in range(len(list_dims_gcn) - 1)])
         self.gcn_layer_norms = nn.ModuleList([nn.LayerNorm(list_dims_gcn[i+1]) for i in range(len(list_dims_gcn) - 2)])
-        
         self.fc_conn = nn.Linear(list_dims_gcn[-1], list_dims_fc[0])
         
+        self.fusion_dim = list_dims_fc[0]
+        list_dims_y = list(np.linspace(external_input_dim, self.fusion_dim, n_fc_external+1, endpoint=True).astype(int))
+        self.external_fc = make_mlp(list_dims_y, dropout=0.2, act_func='relu', norm_type='layer')
+        
         # Fully Connected layers with LayerNorms for stability, except on last FC layer
-        self.fc_layers = nn.ModuleList([nn.Linear(list_dims_fc[i], list_dims_fc[i+1]) for i in range(len(list_dims_fc) - 1)])
-        self.fc_layer_norms = nn.ModuleList([nn.LayerNorm(list_dims_fc[i+1]) for i in range(len(list_dims_fc) - 2)])
+        self.MLP = make_mlp(list_dims=list_dims_fc, dropout=dropout, act_func='relu', norm_type='layer')
+        
+        # Connected fusion parameters
+        self.fusion_fc = nn.Linear(2*self.fusion_dim, self.fusion_dim)
         
         self.dropout = nn.Dropout(dropout)
-        self.param1 = nn.Parameter(torch.tensor(1.0))
-        self.param2 = nn.Parameter(torch.tensor(1.0)) 
+        self.param1 = nn.Parameter(torch.tensor(1.0), requires_grad=True)
+        self.param2 = nn.Parameter(torch.tensor(1.0), requires_grad=True)
         
     def __repr__(self):
         return auto_repr(self)
@@ -1649,23 +1691,13 @@ class GCN_Connected(nn.Module):
                 x = self.gcn_layers[i](x, adjacency_matrices)
         
         x = x.mean(dim=1)#self.weighted_average(x.transpose(-1, -2)).squeeze(-1)#
-        x = torch.concat((self.param1*x, self.param2*y), dim=-1)#torch.concat((x, y), dim=-1)#
+        x = self.fc_conn(x)
+        y = self.external_fc(y)
+        z = torch.concat((self.param1*x, self.param2*y), dim=-1)#torch.concat((x, y), dim=-1)#
+        z = self.fusion_fc(z)
         
-        return x
+        return z
     
-    def input2repr(self, x, layers, layer_norms, dropout):
-        
-        if len(layers):
-            for i in range(len(layers)):
-                if i < len(layers)-1:
-                    x = F.relu(layers[i](x))
-                    x = layer_norms[i](x)
-                    x = dropout(x)
-                else:
-                    x = layers[i](x)
-                
-        return x
-
     def forward(self, x, adjacency_matrix, degree_matrix, y):
         """
         Task:
@@ -1680,7 +1712,7 @@ class GCN_Connected(nn.Module):
             - Tensor: Final output [batch_size]
         """
         x = self.get_features(x, adjacency_matrix, degree_matrix, y)
-        x = self.input2repr(x, self.fc_layers, self.fc_layer_norms, self.dropout)
+        x = self.MLP(x, self.fc_layers, self.fc_layer_norms, self.dropout)
         
         return x.squeeze()  
     
@@ -1736,11 +1768,23 @@ class RGCNConv(nn.Module):
         batch_size, num_relations, num_nodes, _ = adjacency_tensor.size()
         out = torch.zeros(batch_size, num_nodes, self.out_channels, device=x.device)
 
+        # Option - A (for loop)
+        # ********************************************************************************
         for rel in range(num_relations):
             adj = adjacency_tensor[:, rel]  # Shape: [batch_size, num_nodes, num_nodes]
 
             h_rel = torch.matmul(x, self.weights[rel])  # Shape: [batch_size, num_nodes, out_channels]
             out += torch.matmul(adj, h_rel)
+        # ********************************************************************************
+            
+        # # Option - B (vectorised) 
+        # # ********************************************************************************
+        # h = torch.matmul(x.unsqueeze(1),          # [B,1,N,Fin]
+        #                  self.weights.unsqueeze(0) # [1,R,Fin,Fout]
+        #                  )  # -> [B,R,N,Fout]
+        # out = torch.matmul(adjacency_tensor, h)  # [B,R,N,Fout]
+        # out = out.sum(dim=1)
+        # # ********************************************************************************
             
         # ********************************************************************************
         out += torch.matmul(x, self.self_loop_weight)
@@ -1895,13 +1939,8 @@ class MRGCN(nn.Module):
         self.attn_type = attn_type
 
         # GCN Layers
-        self.gcn_layers = nn.ModuleList([
-            RGCNConv(list_dims_gcn[i], list_dims_gcn[i + 1], num_relations=self.num_relations)
-            for i in range(len(list_dims_gcn) - 1)
-        ])
-        self.gcn_layer_norms = nn.ModuleList([
-            nn.LayerNorm(list_dims_gcn[i + 1]) for i in range(len(list_dims_gcn) - 2)
-        ])
+        self.gcn_layers = nn.ModuleList([RGCNConv(list_dims_gcn[i], list_dims_gcn[i + 1], num_relations=self.num_relations) for i in range(len(list_dims_gcn) - 1)])
+        self.gcn_layer_norms = nn.ModuleList([nn.LayerNorm(list_dims_gcn[i + 1]) for i in range(len(list_dims_gcn) - 2)])
         
         # --- QK^T V Attention Pooling ---
         hidden_dim = list_dims_gcn[-1]
@@ -2012,6 +2051,674 @@ class MRGCN(nn.Module):
         x = self.fc_conn(x)
         x = self.input2repr(x)
         return x#.squeeze()
+    
+    
+class GINConv(nn.Module):
+    """
+    Task:
+        Graph Isomorphism Network (GIN) convolution layer.
+
+    Inputs:
+        - in_channels (int): Input node feature dimension.
+        - out_channels (int): Output node feature dimension.
+        - eps (float): Initial epsilon value.
+        - train_eps (bool): Whether epsilon is learnable.
+
+    Outputs:
+        - Tensor: Updated node features.
+    """
+    def __init__(self, in_channels, out_channels, eps=0.0, train_eps=True):
+        super(GINConv, self).__init__()
+
+        if train_eps:
+            self.eps = nn.Parameter(torch.Tensor([eps]))
+        else:
+            self.register_buffer('eps', torch.Tensor([eps]))
+
+        self.mlp = nn.Sequential(nn.Linear(in_channels, out_channels),
+                                 nn.ReLU(),
+                                 nn.Linear(out_channels, out_channels)
+                                 )
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        for m in self.mlp:
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                nn.init.zeros_(m.bias)
+
+    def forward(self, x, adjacency):
+        """
+        Task:
+            Perform GIN message passing.
+
+        Inputs:
+            - x (Tensor): Node features [batch_size, num_nodes, in_channels]
+            - adjacency (Tensor): Adjacency matrix [batch_size, num_nodes, num_nodes]
+
+        Outputs:
+            - Tensor: Updated node features [batch_size, num_nodes, out_channels]
+        """
+        
+        # Sum aggregation of neighbors
+        neigh_agg = torch.matmul(adjacency, x)
+
+        # (1 + eps) * x + sum_j x_j
+        out = (1.0 + self.eps) * x + neigh_agg
+
+        # Apply MLP
+        out = self.mlp(out)
+
+        return out
+    
+
+class GIN(nn.Module):
+    """
+    Graph Isomorphism Network (GIN) for graph-level representation learning.
+
+    Args:
+        list_dims_gin (list[int]): Dimensions of GIN layers.
+            Example: [in_dim, hidden1, hidden2]
+        list_dims_fc (list[int]): Dimensions for graph-level MLP head.
+            Example: [hidden2, 128, out_dim]
+        dropout (float): Dropout probability.
+        max_num_atom (int): Maximum number of nodes (kept for compatibility).
+        act_func (str): Activation for FC layers.
+        act_func_gin (str): Activation for GIN layers.
+        norm_type (str): Normalization type used in MLP.
+        eps (float): Initial epsilon for GIN aggregation.
+        train_eps (bool): Whether epsilon is learnable.
+    """
+
+    def __init__(
+        self,
+        list_dims_gin,
+        list_dims_fc,
+        dropout=0.0,
+        max_num_atom=None,
+        act_func='relu',
+        act_func_gin='relu',
+        norm_type='layer',
+        eps=torch.pi,
+        train_eps=False,
+    ):
+        super().__init__()
+
+        self.class_def = inspect.getsource(self.__class__)
+        self.max_num_atom = max_num_atom
+        self.act_func = act_func
+        self.act_func_gin = act_func_gin
+        self.norm_type = norm_type
+        self.eps = eps
+        self.train_eps = train_eps
+        self.dropout = nn.Dropout(dropout)
+        self.activation_func_gin = activation_func(act_func_gin)
+        self.readout_dim = sum(list_dims_gin[1:])
+        # list_dims_fc = [self.readout_dim] + list_dims_fc if list_dims_fc else []
+
+        # --------------------------------------------------
+        # GIN layers
+        # --------------------------------------------------
+        self.gin_layers = nn.ModuleList([GINConv(list_dims_gin[i], list_dims_gin[i + 1], eps=eps, train_eps=train_eps) for i in range(len(list_dims_gin) - 1)])
+        self.gin_norms = nn.ModuleList([nn.LayerNorm(list_dims_gin[i + 1]) for i in range(len(list_dims_gin) - 2)])
+        self.mixer_fc = nn.Linear(self.readout_dim, self.readout_dim)
+        self.fc_conn = nn.Linear(self.readout_dim, list_dims_fc[0])
+        # --------------------------------------------------
+        # Graph-level prediction head
+        # --------------------------------------------------
+        if list_dims_fc and len(list_dims_fc) > 1:
+            self.head = make_mlp(list_dims=list_dims_fc, dropout=dropout, act_func=act_func, norm_type=norm_type)
+        else:
+            self.head = nn.Identity()
+
+    # ------------------------------------------------------
+    # Representation
+    # ------------------------------------------------------
+    def __repr__(self):
+        return auto_repr(self)
+
+    # ------------------------------------------------------
+    # Node embeddings -> graph embedding
+    # ------------------------------------------------------
+    def get_features( self,
+                     feature_vector: torch.Tensor,
+                     adjacency_tensor: torch.Tensor,
+                     degree_tensor: torch.Tensor = None,
+                     feature_mask=1.0,
+                     adjacency_mask=1.0
+                     ) -> torch.Tensor:
+        """
+        Task:
+            Extract GIN-based node embeddings.
+
+        Inputs:
+            - feature_vector (Tensor): Node features [batch_size, num_nodes, in_features]
+            - adjacency_tensor (Tensor): Adjacency matrices [batch_size, num_nodes, num_nodes]
+            - degree_tensor (Tensor): Degree matrices [batch_size, num_nodes, num_nodes]
+
+        Outputs:
+            - Tensor: Graph-level features after pooling [batch_size, gin_out_dim]
+        Inputs:
+            feature_vector: [B, N, F]
+            adjacency_tensor: [B, R, N, N] or [B, N, N]
+        """
+        
+        feature_vector = feature_vector * feature_mask
+        adjacency_tensor = adjacency_tensor * adjacency_mask
+        degree_tensor = degree_tensor * adjacency_mask
+
+        # If multi-relational adjacency → collapse relations
+        if adjacency_tensor.dim() == 4:
+            adjacency_matrices = adjacency_tensor.sum(dim=1)
+        else:
+            adjacency_matrices = adjacency_tensor
+        x = feature_vector
+        
+        layer_outputs = []
+        for i, layer in enumerate(self.gin_layers):
+
+            x = layer(x, adjacency_matrices)
+            # hidden layers only
+            if i < len(self.gin_layers) - 1:
+                x = self.activation_func_gin(x)
+                x = self.gin_norms[i](x)
+                x = self.dropout(x)
+            layer_outputs.append(x)
+            
+        pooled = [h.sum(dim=1) for h in layer_outputs]
+        graph_repr = torch.cat(pooled, dim=-1)
+        x = F.relu(self.mixer_fc(graph_repr))
+        x = self.fc_conn(x)
+        
+        self.feature_dim = x.shape[-1]
+
+        return x
+
+    # ------------------------------------------------------
+    # Forward
+    # ------------------------------------------------------
+    def forward(
+                self,
+                feature_vector: torch.Tensor,
+                adjacency_tensor: torch.Tensor,
+                degree_tensor: torch.Tensor = None,
+                feature_mask=1.0,
+                adjacency_mask=1.0
+            ) -> torch.Tensor:
+
+        x = self.get_features(feature_vector, adjacency_tensor, degree_tensor, feature_mask, adjacency_mask)
+        x = self.head(x)
+
+        return x
+
+
+class GIN(nn.Module):
+    """
+    Graph Isomorphism Network (GIN) for graph-level representation learning.
+
+    Args:
+        list_dims_gin (list[int]): Dimensions of GIN layers.
+            Example: [in_dim, hidden1, hidden2]
+        list_dims_fc (list[int]): Dimensions for graph-level MLP head.
+            Example: [hidden2, 128, out_dim]
+        dropout (float): Dropout probability.
+        max_num_atom (int): Maximum number of nodes (kept for compatibility).
+        act_func (str): Activation for FC layers.
+        act_func_gin (str): Activation for GIN layers.
+        norm_type (str): Normalization type used in MLP.
+        eps (float): Initial epsilon for GIN aggregation.
+        train_eps (bool): Whether epsilon is learnable.
+    """
+
+    def __init__(
+        self,
+        list_dims_gin,
+        list_dims_fc,
+        dropout=0.0,
+        max_num_atom=None,
+        act_func='relu',
+        act_func_gin='relu',
+        norm_type='layer',
+        eps=torch.pi,
+        train_eps=False,
+    ):
+        super().__init__()
+
+        self.class_def = inspect.getsource(self.__class__)
+        self.list_dims_gin = list_dims_gin
+        self.list_dims_fc = list_dims_fc
+        self.max_num_atom = max_num_atom
+        self.act_func = act_func
+        self.act_func_gin = act_func_gin
+        self.norm_type = norm_type
+        self.eps = eps
+        self.train_eps = train_eps
+        self.dropout = nn.Dropout(dropout)
+        self.activation_func_gin = activation_func(act_func_gin)
+        self.readout_dim = sum(list_dims_gin[1:])
+        # list_dims_fc = [self.readout_dim] + list_dims_fc if list_dims_fc else []
+
+        # --------------------------------------------------
+        # GIN layers
+        # --------------------------------------------------
+        self.gin_layers = nn.ModuleList([GINConv(list_dims_gin[i], list_dims_gin[i + 1], eps=eps, train_eps=train_eps) for i in range(len(list_dims_gin) - 1)])
+        self.gin_norms = nn.ModuleList([nn.LayerNorm(list_dims_gin[i + 1]) for i in range(len(list_dims_gin) - 2)])
+        self.mixer_fc = nn.Sequential(nn.Linear(self.readout_dim, self.readout_dim),
+                                      nn.ReLU(),
+                                      nn.Linear(self.readout_dim, list_dims_gin[-1])
+                                      )
+        # --------------------------------------------------
+        # Graph-level prediction head
+        # --------------------------------------------------
+        self.fc_conn = nn.Linear(list_dims_gin[-1], list_dims_fc[0])
+        if list_dims_fc and len(list_dims_fc) > 1:
+            self.head = make_mlp(list_dims=list_dims_fc, dropout=dropout, act_func=act_func, norm_type=norm_type)
+        else:
+            self.head = nn.Identity()
+
+    # ------------------------------------------------------
+    # Representation
+    # ------------------------------------------------------
+    def __repr__(self):
+        return auto_repr(self)
+    
+    # ------------------------------------------------------
+    # Node embeddings -> graph embedding
+    # ------------------------------------------------------
+    def get_features(self,
+                     feature_vector: torch.Tensor,
+                     adjacency_tensor: torch.Tensor,
+                     degree_tensor: torch.Tensor = None,
+                     feature_mask=1.0,
+                     adjacency_mask=1.0
+                     ) -> torch.Tensor:
+        """
+        Task:
+            Extract GIN-based node embeddings.
+
+        Inputs:
+            - feature_vector (Tensor): Node features [batch_size, num_nodes, in_features]
+            - adjacency_tensor (Tensor): Adjacency matrices [batch_size, num_nodes, num_nodes]
+            - degree_tensor (Tensor): Degree matrices [batch_size, num_nodes, num_nodes]
+
+        Outputs:
+            - Tensor: Graph-level features after pooling [batch_size, gin_out_dim]
+        Inputs:
+            feature_vector: [B, N, F]
+            adjacency_tensor: [B, R, N, N] or [B, N, N]
+        """
+        
+        feature_vector = feature_vector * feature_mask
+        adjacency_tensor = adjacency_tensor * adjacency_mask
+        degree_tensor = degree_tensor * adjacency_mask
+
+        # If multi-relational adjacency → collapse relations
+        if adjacency_tensor.dim() == 4:
+            adjacency_matrices = adjacency_tensor.sum(dim=1)
+        else:
+            adjacency_matrices = adjacency_tensor
+        x = feature_vector
+        
+        layer_outputs = []
+        for i, layer in enumerate(self.gin_layers):
+
+            x = layer(x, adjacency_matrices)
+            # hidden layers only
+            if i < len(self.gin_layers) - 1:
+                x = self.activation_func_gin(x)
+                x = self.gin_norms[i](x)
+                x = self.dropout(x)
+                # print(f'layer {i}: ', x)
+            layer_outputs.append(x)
+            
+        pooled = [h.sum(dim=1) for h in layer_outputs]
+        graph_repr = torch.cat(pooled, dim=-1)
+        x = self.mixer_fc(graph_repr)
+        
+        self.feature_dim = x.shape[-1]
+
+        return x
+
+    # ------------------------------------------------------
+    # Forward
+    # ------------------------------------------------------
+    def forward(
+                self,
+                feature_vector: torch.Tensor,
+                adjacency_tensor: torch.Tensor,
+                degree_tensor: torch.Tensor = None,
+                feature_mask=1.0,
+                adjacency_mask=1.0
+            ) -> torch.Tensor:
+
+        x = self.get_features(feature_vector, adjacency_tensor, degree_tensor, feature_mask, adjacency_mask)
+        x = self.fc_conn(x)
+        x = self.head(x)
+
+        return x
+    
+class GIN_FU(GIN):
+    """
+    Graph Isomorphism Network (GIN) for graph-level representation learning.
+
+    Args:
+        list_dims_gin (list[int]): Dimensions of GIN layers.
+            Example: [in_dim, hidden1, hidden2]
+        list_dims_fc (list[int]): Dimensions for graph-level MLP head.
+            Example: [hidden2, 128, out_dim]
+        dropout (float): Dropout probability.
+        max_num_atom (int): Maximum number of nodes (kept for compatibility).
+        act_func (str): Activation for FC layers.
+        act_func_gin (str): Activation for GIN layers.
+        norm_type (str): Normalization type used in MLP.
+        eps (float): Initial epsilon for GIN aggregation.
+        train_eps (bool): Whether epsilon is learnable.
+    """
+
+    def __init__(
+        self,
+        list_dims_gin,
+        list_dims_fc,
+        dropout=0.0,
+        max_num_atom=None,
+        act_func='relu',
+        act_func_gin='relu',
+        norm_type='layer',
+        eps=torch.pi,
+        train_eps=False,
+    ):
+        super().__init__(list_dims_gin=list_dims_gin,
+                         list_dims_fc=list_dims_fc,
+                         dropout=dropout,
+                         max_num_atom=max_num_atom,
+                         act_func=act_func,
+                         act_func_gin=act_func_gin,
+                         norm_type=norm_type,
+                         eps=eps,
+                         train_eps=train_eps
+                        )
+        
+    def forward(self,
+                feature_vector: torch.Tensor,
+                adjacency_tensor: torch.Tensor,
+                degree_tensor: torch.Tensor = None,
+                feature_mask=1.0,
+                adjacency_mask=1.0
+            ) -> torch.Tensor:
+        
+        x = super().forward(feature_vector, adjacency_tensor, degree_tensor, feature_mask, adjacency_mask)
+        x = torch.sigmoid(x)
+        
+        return x
+
+
+class GIN_SINKHORN(nn.Module):
+    """
+    GIN with:
+        - Residual connections per layer
+        - Dense layer-wise readout (JK-style)
+        - Sinkhorn-normalized transport mixing
+    """
+
+    def __init__(
+        self,
+        list_dims_gin,
+        list_dims_fc,
+        dropout=0.0,
+        act_func='relu',
+        act_func_gin='relu',
+        norm_type='layer',
+        eps=0.0,
+        train_eps=False,
+        sinkhorn_iters=20,
+        use_sinkhorn=False,
+        transport_residual=True,
+    ):
+        super().__init__()
+
+        self.list_dims_gin = list_dims_gin
+        self.list_dims_fc = list_dims_fc
+        self.act_func = act_func
+        self.act_func_gin = act_func_gin
+        self.norm_type = norm_type
+        self.eps = eps
+        self.train_eps = train_eps
+        self.dropout = nn.Dropout(dropout)
+        self.sinkhorn_iters = sinkhorn_iters
+        self.use_sinkhorn = use_sinkhorn
+        self.transport_residual = transport_residual
+
+        # --------------------------------------------------
+        # GIN Layers
+        # --------------------------------------------------
+        self.gin_layers = nn.ModuleList()
+        self.gin_norms = nn.ModuleList()
+        self.res_projections = nn.ModuleList()
+
+        for i in range(len(list_dims_gin) - 1):
+            in_dim = list_dims_gin[i]
+            out_dim = list_dims_gin[i + 1]
+
+            self.gin_layers.append(GINConv(in_dim, out_dim, eps=eps, train_eps=train_eps))
+            if i < len(list_dims_gin) - 2:
+                self.gin_norms.append(nn.LayerNorm(out_dim))
+
+            # Residual projection
+            if in_dim != out_dim:
+                self.res_projections.append(nn.Linear(in_dim, out_dim))
+            else:
+                self.res_projections.append(nn.Identity())
+
+        self.activation_func_gin = activation_func(act_func_gin)
+
+        # --------------------------------------------------
+        # Dense Readout
+        # --------------------------------------------------
+        self.readout_dim = sum(list_dims_gin[1:])
+
+        # Sinkhorn transport weight (log-space parameter)
+        if use_sinkhorn:
+            self.transport_weight = nn.Parameter(torch.randn(self.readout_dim, self.readout_dim) * 0.1)
+            
+        self.post_transport = nn.Sequential(nn.Linear(self.readout_dim, list_dims_gin[-1]), nn.SiLU())
+        # self.post_transport = nn.Sequential(nn.Linear(self.readout_dim, list_dims_gin[-1]),
+        #                                     nn.ReLU(),
+        #                                     nn.Dropout(dropout)
+        #                                     )
+
+        # --------------------------------------------------
+        # Graph-level Head
+        # --------------------------------------------------
+        self.fc_conn = nn.Linear(list_dims_gin[-1], list_dims_fc[0])
+
+        if list_dims_fc and len(list_dims_fc) > 1:
+            self.head = make_mlp(list_dims=list_dims_fc, dropout=dropout, act_func=act_func, norm_type=norm_type)
+        else:
+            self.head = nn.Identity()
+            
+            
+    def __repr__(self):
+        return auto_repr(self)
+
+    # ------------------------------------------------------
+    # Sinkhorn normalization (weights)
+    # ------------------------------------------------------
+    def sinkhorn_normalization(self, log_alpha, eps=1e-6):
+        Q = torch.exp(log_alpha)
+
+        for _ in range(self.sinkhorn_iters):
+            Q = Q / (Q.sum(dim=1, keepdim=True) + eps)  # row norm
+            Q = Q / (Q.sum(dim=0, keepdim=True) + eps)  # col norm
+
+        return Q
+
+    # ------------------------------------------------------
+    # Feature extraction
+    # ------------------------------------------------------
+    def get_features(self,
+                     feature_vector: torch.Tensor,
+                     adjacency_tensor: torch.Tensor,
+                     degree_tensor: torch.Tensor = None,
+                     feature_mask=1.0,
+                     adjacency_mask=1.0
+                     ):
+
+        if adjacency_tensor.dim() == 4:
+            adjacency_matrices = adjacency_tensor.sum(dim=1)
+        else:
+            adjacency_matrices = adjacency_tensor
+
+        x = feature_vector
+        layer_outputs = []
+
+        for i, layer in enumerate(self.gin_layers):
+
+            identity = x
+            out = layer(x, adjacency_matrices)
+
+            # Residual connection
+            identity = self.res_projections[i](identity)
+            x = out + identity
+
+            if i < len(self.gin_layers) - 1:
+                x = self.activation_func_gin(x)
+                x = self.gin_norms[i](x)
+                x = self.dropout(x)
+
+            layer_outputs.append(x)
+
+        # JK-style dense pooling
+        pooled = [h.sum(dim=1) for h in layer_outputs]
+        graph_repr = torch.cat(pooled, dim=-1)
+
+        # --------------------------------------------------
+        # Sinkhorn transport mixing
+        # --------------------------------------------------
+        if self.use_sinkhorn:
+            W_ds = self.sinkhorn_normalization(self.transport_weight)
+            transported = graph_repr @ W_ds
+
+            if self.transport_residual:
+                transported = transported + graph_repr
+
+            x = self.post_transport(transported)
+            
+        else:
+            x = self.post_transport(graph_repr)
+            
+        self.feature_dim = x.shape[-1]
+
+        return x
+
+    # ------------------------------------------------------
+    # Forward
+    # ------------------------------------------------------
+    def forward(self,
+                feature_vector: torch.Tensor,
+                adjacency_tensor: torch.Tensor,
+                degree_tensor: torch.Tensor = None,
+                feature_mask=1.0,
+                adjacency_mask=1.0):
+
+        x = self.get_features(feature_vector, adjacency_tensor)
+        x = self.fc_conn(x)
+        x = self.head(x)
+
+        return x
+    
+
+class GIN_PyG(nn.Module):
+    def __init__(
+        self,
+        list_dims_gin,
+        list_dims_fc,
+        dropout=0.0,
+        eps=0.0,
+        train_eps=False,
+    ):
+        """
+        list_dims_gin: [in_dim, hidden1, hidden2, ...]
+        list_dims_fc:  [hidden_last, fc1, ..., out_dim]
+        """
+
+        super().__init__()
+
+        self.list_dims_gin = list_dims_gin
+        self.list_dims_fc = list_dims_fc
+        self.eps = eps
+        self.train_eps = train_eps
+        self.class_def = inspect.getsource(self.__class__)
+        self.dropout = nn.Dropout(dropout)
+
+        # --------------------------------------------------
+        # GIN Layers (PyG implementation)
+        # --------------------------------------------------
+        self.gin_layers = nn.ModuleList()
+        self.norm_layers = nn.ModuleList()
+
+        for i in range(len(list_dims_gin) - 1):
+
+            mlp = nn.Sequential(
+                nn.Linear(list_dims_gin[i], list_dims_gin[i + 1]),
+                nn.Tanh(),
+                nn.Linear(list_dims_gin[i + 1], list_dims_gin[i + 1]),
+            )
+
+            conv = PyG_GINConv(nn=mlp, eps=eps, train_eps=train_eps)
+            self.gin_layers.append(conv)
+
+            if i < len(list_dims_gin) - 2:
+                self.norm_layers.append(LayerNorm(list_dims_gin[i + 1]))
+
+        # --------------------------------------------------
+        # Graph-level head
+        # --------------------------------------------------
+        self.fc_head = nn.Sequential()
+        list_dims_fc = [list_dims_gin[-1], ] + list_dims_fc
+
+        if len(list_dims_fc) > 1:
+            layers = []
+            for i in range(len(list_dims_fc) - 1):
+                layers.append(nn.Linear(list_dims_fc[i], list_dims_fc[i + 1]))
+                if i < len(list_dims_fc) - 2:
+                    layers.append(LayerNorm(list_dims_fc[i + 1]))
+                    layers.append(nn.ReLU())
+                    layers.append(nn.Dropout(dropout))
+            self.fc_head = nn.Sequential(*layers)
+        else:
+            self.fc_head = nn.Identity()
+            
+    def __repr__(self):
+        return auto_repr(self)
+    
+    def get_features(self, x, edge_index, batch, **kwargs):
+        for i, conv in enumerate(self.gin_layers):
+
+            x = conv(x, edge_index)
+
+            if i < len(self.gin_layers) - 1:
+                x = F.relu(x)
+                x = self.norm_layers[i](x)
+                x = self.dropout(x)
+
+        # Graph-level pooling
+        x = global_add_pool(x, batch)
+        self.feature_dim = x.shape[-1]
+
+        return x
+
+    # ------------------------------------------------------
+    # Forward
+    # ------------------------------------------------------
+    def forward(self, x, edge_index, batch, **kwargs):
+
+        x = self.get_features(x, edge_index, batch)
+        # FC head
+        x = self.fc_head(x)
+
+        return x
+    
     
 class ChemBERTaRegressorroberta(RobertaPreTrainedModel):
     """
