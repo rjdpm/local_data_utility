@@ -1534,21 +1534,23 @@ def get_colors(colours = ['red', 'blue', 'green', 'violet', 'pink', 'orange', 'g
 def apply_reductions(df: pd.DataFrame | np.ndarray,
                     value_col: str | int | None = None,
                     proj_names: List[str] = ["PCA", "t-SNE", "UMAP", "Isomap", "FactorAnalysis", "MDS", "TruncatedSVD", "KernelPCA"],
-                    use_lda: bool = False
+                    use_lda: bool = False,
+                    normalize: bool = False,
                     ) -> Tuple[Dict[str, np.ndarray], Dict[str, object], np.ndarray]:
     """
     Apply multiple dimensionality reduction techniques (2D projection).
 
-    Args:
-        df (pd.DataFrame): Input dataframe with features + value column.
-        proj_names (list): Required projections.
-        value_col (str): Column used for coloring (can be discrete or continuous).
-        use_lda (bool): Whether to include LDA (requires discrete labels).
-    Returns: 
-        Output: (projections, trained, values)
-        projections: dict {method -> (n,2) array}
-        trained_reducers: dict {method -> fitted reducer object}
-        values: colour/label vector (or None)
+    - Args:
+        - df (pd.DataFrame): Input dataframe with features + value column.
+        - proj_names (list): Required projections.
+        - value_col (str): Column used for coloring (can be discrete or continuous).
+        - use_lda (bool): Whether to include LDA (requires discrete labels).
+    
+    - Returns: 
+        - Output: (projections, trained, values)
+        - projections: dict {method -> (n,2) array}
+        - trained_reducers: dict {method -> fitted reducer object}
+        - values: colour/label vector (or None)
     """
 
     # --- Extract X and values ---
@@ -1586,6 +1588,7 @@ def apply_reductions(df: pd.DataFrame | np.ndarray,
 
         try:
             reducer = reducers[name]
+            X = StandardScaler().fit_transform(X) if normalize else X
             if name == "LDA":
                 Z = reducer.fit_transform(X, values)
             else:
@@ -1600,164 +1603,246 @@ def apply_reductions(df: pd.DataFrame | np.ndarray,
     return projections, trained, values
 
 
-def plot_reductions(results: dict, values: np.ndarray,
-                    ncols: int = 3, figsize=(16, 12), cmap="viridis", cbar_name = 'Value'):
+def plot_reductions(results: dict,
+                    values: dict,
+                    ncols: int = 3,
+                    figsize=(16, 12),
+                    cmap="viridis",
+                    cbar_name="Value"):
     """
-    Plot 2D projections from multiple dimensionality reduction methods
-    with consistent style and non-overlapping colorbars/legends.
+    Plot 2D projections obtained from multiple dimensionality reduction
+    methods.
 
-    Args:
-        results (dict): {method_name: projection_array (n_samples, 2)}.
-        values (array-like): Column values (discrete or continuous).
-        ncols (int): Number of subplot columns.
-        figsize (tuple): Figure size.
-        cmap (str): Colormap for continuous values.
+    Parameters
+    ----------
+    results : dict
+        Dictionary mapping projection names to 2D coordinates:
+        {method_name: ndarray of shape (n_samples_i, 2)}.
+
+    values : dict
+        Dictionary mapping projection names to label/value vectors:
+        {method_name: ndarray of shape (n_samples_i,)}.
+
+        Each projection may contain a different number of samples.
+
+    ncols : int, default=3
+        Number of subplot columns.
+
+    figsize : tuple, default=(16,12)
+        Figure size.
+
+    cmap : str, default="viridis"
+        Colormap for continuous labels.
+
+    cbar_name : str, default="Value"
+        Colorbar label.
+
+    Returns
+    -------
+    None
     """
+
     sns.set_style("whitegrid")
 
-    # Detect discrete vs continuous values
-    values = np.array(values)
-    is_discrete = (pd.Series(values).dtype == "object" or
-                   pd.api.types.is_categorical_dtype(values) or
-                   len(np.unique(values)) < 15)
+    values = {k: np.asarray(v) for k, v in values.items()}
+
+    # Validate inputs
+    if set(results.keys()) != set(values.keys()):
+        raise ValueError("results and values must have identical keys.")
+
+    for key in results:
+        if len(results[key]) != len(values[key]):
+            raise ValueError(f"{key}: number of samples in results and values do not match.")
 
     n_methods = len(results)
     nrows = int(np.ceil(n_methods / ncols))
 
-    fig, axes = plt.subplots(nrows, ncols, figsize=figsize,
-                             constrained_layout=True)
-    axes = axes.flatten()
+    fig, axes = plt.subplots(nrows, ncols, figsize=figsize, constrained_layout=True)
+    axes = np.ravel(axes)
 
-    if is_discrete:
-        unique_vals = np.unique(values)
-        palette = sns.color_palette("tab10", len(unique_vals))
-        lut = dict(zip(unique_vals, palette))
-        colors = pd.Series(values).map(lut)
+    # Global normalization for continuous labels
+    continuous_arrays = [v for v in values.values() if np.issubdtype(v.dtype, np.number) and len(np.unique(v)) >= 15]
 
-        for ax, (name, proj) in zip(axes, results.items()):
-            ax.scatter(proj[:, 0], proj[:, 1], c=colors, s=20, alpha=0.8)
-            ax.set_title(name, fontsize=12, fontweight="bold")
-            ax.set_xticks([]); ax.set_yticks([])
-
-        # Legend below all plots
-        handles = [plt.Line2D([0], [0], marker='o', color='w',
-                              markerfacecolor=lut[val], label=str(val), markersize=6)
-                   for val in unique_vals]
-        fig.legend(handles=handles, loc="lower center",
-                   ncol=min(len(unique_vals), 6), frameon=False, fontsize=12)
-
-    else:  # Continuous case
-        norm = plt.Normalize(vmin=np.min(values), vmax=np.max(values))
-        sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    if len(continuous_arrays) > 0:
+        all_vals = np.concatenate(continuous_arrays)
+        global_norm = plt.Normalize(all_vals.min(), all_vals.max())
+        sm = plt.cm.ScalarMappable(cmap=cmap, norm=global_norm)
         sm.set_array([])
+    else:
+        global_norm = None
 
-        for ax, (name, proj) in zip(axes, results.items()):
-            sc = ax.scatter(proj[:, 0], proj[:, 1],
-                            c=values, cmap=cmap, s=20, alpha=0.8, norm=norm)
-            ax.set_title(name, fontsize=12, fontweight="bold")
-            ax.set_xticks([]); ax.set_yticks([])
+    for ax, (name, proj) in zip(axes, results.items()):
 
-        # Shared colorbar on the right
-        cbar = fig.colorbar(sm, ax=axes, fraction=0.02, pad=0.02)
+        y = values[name]
+        is_discrete = (y.dtype == object
+                       or pd.api.types.is_categorical_dtype(y)
+                       or len(np.unique(y)) < 15
+                       )
+
+        if is_discrete:
+            unique_vals = np.unique(y)
+            palette = sns.color_palette("tab10", len(unique_vals))
+            lut = dict(zip(unique_vals, palette))
+            colors = pd.Series(y).map(lut)
+            ax.scatter(proj[:, 0], proj[:, 1], c=colors, s=20, alpha=0.8)
+        else:
+            ax.scatter(proj[:, 0], proj[:, 1], c=y, cmap=cmap, norm=global_norm, s=20, alpha=0.8)
+
+        ax.set_title(name, fontsize=12, fontweight="bold")
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+    # Shared colorbar (continuous case)
+    if global_norm is not None:
+        cbar = fig.colorbar(sm, ax=axes[:n_methods], fraction=0.02, pad=0.02,)
         cbar.set_label(cbar_name, fontsize=11)
 
-    # Hide unused axes if any
+    # Hide unused axes
     for ax in axes[n_methods:]:
         ax.axis("off")
 
     plt.show()
 
-
-def plot_projection_grid_seaborn(matrices,
-                                 labels,
-                                 rep_names,
-                                 highlight_index=None,
-                                 proj_names = ["PCA", "t-SNE", "UMAP", "Isomap", "FactorAnalysis", "MDS", "TruncatedSVD", "KernelPCA"],
-                                 ):
+def plot_projection_grid_seaborn(
+    matrices,
+    labels,
+    rep_names,
+    cmap="viridis",
+    highlight_index=None,
+    normalise=True,
+    show_xticks=False,
+    show_yticks=False,
+    show_grid=False,
+    figsize=None,
+    cbar_label='Fraction unbound value',
+    suptitle = "2D Projections of Different Representations",
+    proj_names=["PCA", "t-SNE", "UMAP", "Isomap",
+                "FactorAnalysis", "MDS",
+                "TruncatedSVD", "KernelPCA"],
+):
     """
-    matrices  : list of arrays [(n_samples, d1), ..., (n_samples, dk)]
-    labels    : (n_samples,)
-    rep_names : list of strings
+    Visualize multiple feature representations using a grid of 2D dimensionality
+    reduction projections.
+
+    Each row corresponds to one feature representation, while each column
+    corresponds to a dimensionality reduction technique. Every feature matrix is
+    standardized independently before projection. Each representation may contain
+    a different number of samples.
+
+    Parameters
+    ----------
+    matrices : list of ndarray
+        List of feature matrices of shape (n_samples_i, n_features_i).
+
+    labels : list of array-like
+        List of label vectors, one for each representation. Each label vector
+        must have the same length as the corresponding feature matrix.
+
+    rep_names : list of str
+        Names of the feature representations.
+
+    highlight_index : int, optional
+        Sample index to highlight. A point is highlighted only if the index
+        exists for that representation.
+
+    proj_names : list of str or "all", optional
+        Projection methods to visualize.
+
+    Returns
+    -------
+    None
     """
 
     sns.set_theme(style="whitegrid", context="notebook", font_scale=1.05)
 
     matrices = [np.asarray(X) for X in matrices]
-    labels = np.asarray(labels)
+    labels = [np.asarray(y) for y in labels]
+
+    if not (len(matrices) == len(labels) == len(rep_names)):
+        raise ValueError("matrices, labels and rep_names must have the same length.")
+
+    for X, y in zip(matrices, labels):
+        if len(X) != len(y):
+            raise ValueError("Each label vector must have the same number of samples as its corresponding feature matrix.")
 
     n_reps = len(matrices)
-    
-    if proj_names == 'all':
-        n_col = 8
-    else:
-        n_col = len(proj_names)
+    if proj_names == "all":
+        proj_names = ["PCA", "t-SNE", "UMAP", "Isomap", "FactorAnalysis", "MDS", "TruncatedSVD", "KernelPCA"]
 
-    plt.figure(figsize=(4*n_col, 3.3 * n_reps))
-    fig, axes = plt.subplots(n_reps, n_col, figsize=(4*n_col, 3.3 * n_reps), squeeze=False)
+    n_col = len(proj_names)
+    fig, axes = plt.subplots(n_reps, 
+                             n_col,
+                             figsize=(4 * n_col, 3.3 * n_reps) if figsize is None else figsize,
+                             squeeze=False,
+                             )
+    continuous_rows = []
 
-    # Decide if labels are continuous or categorical
-    is_continuous = np.issubdtype(labels.dtype, np.floating)
+    for i, (X, y, rep_name) in enumerate(zip(matrices, labels, rep_names)):
 
-    palette = "viridis" if is_continuous else "tab10"
-
-    for i, (X, rep_name) in enumerate(zip(matrices, rep_names)):
-
-        # Standardization (critical)
-        Xs = StandardScaler().fit_transform(X)
-
-        projections_func = {
+        Xs = StandardScaler().fit_transform(X) if normalise else X
+        reducers = {
             "PCA": PCA(n_components=2, random_state=42),
-            "t-SNE": TSNE(n_components=2, perplexity=30, learning_rate="auto", init="pca", random_state=42),
-            "UMAP": umap.UMAP(n_components=2, n_neighbors=15, min_dist=0.1, random_state=42),
+            "t-SNE": TSNE(n_components=2, perplexity=30, learning_rate="auto", init="pca", random_state=42,),
+            "UMAP": umap.UMAP(n_components=2, n_neighbors=15, min_dist=0.1, random_state=42, ),
             "Isomap": Isomap(n_components=2, n_neighbors=15),
-            "FactorAnalysis": FactorAnalysis(n_components=2, random_state=42),
-            "MDS": MDS(n_components=2, random_state=42, n_init=1, max_iter=300),
-            "TruncatedSVD": TruncatedSVD(n_components=2, random_state=42),
-            "KernelPCA":KernelPCA(n_components=2, kernel="rbf", random_state=42),
-        }
-        if proj_names == 'all':
-            projections = {k:projections_func[k].fit_transform(Xs) for k in projections_func.keys()}
-        else:    
-            projections = {k:projections_func[k].fit_transform(Xs) for k in proj_names}
+            "FactorAnalysis": FactorAnalysis(n_components=2, random_state=42,),
+            "MDS": MDS(n_components=2, random_state=42, n_init=1, max_iter=300,),
+            "TruncatedSVD": TruncatedSVD(n_components=2, random_state=42,),
+            "KernelPCA": KernelPCA(n_components=2, kernel="rbf", random_state=42,),
+            }
 
-        for j, (pname, Z) in enumerate(projections.items()):
+        is_continuous = np.issubdtype(y.dtype, np.floating)
 
+        if is_continuous:
+            continuous_rows.append(y)
+
+        for j, name in enumerate(proj_names):
+
+            Z = reducers[name].fit_transform(Xs)
             ax = axes[i, j]
 
-            sns.scatterplot(x=Z[:, 0], y=Z[:, 1], hue=labels, palette=palette, ax=ax, s=35, alpha=0.85, linewidth=0, legend=False)
-            if highlight_index is not None:
+            if is_continuous:
+                ax.scatter(Z[:, 0], Z[:, 1], c=y, cmap=cmap, s=35, alpha=0.85)
+            else:
+                sns.scatterplot(x=Z[:, 0], y=Z[:, 1], hue=y, palette="tab10", ax=ax, s=35, alpha=0.85, linewidth=0, legend=False,)
+
+            if (highlight_index is not None and highlight_index < len(Z)):
                 ax.scatter(Z[highlight_index, 0], Z[highlight_index, 1], color="red", s=20, zorder=5)
-                
-            # sns.scatterplot(x=Z[:, 0], y=Z[:, 1], hue=labels, palette=palette, ax=ax, s=35, alpha=0.85, linewidth=0, legend=(i == 0 and j == 2))
 
             if i == 0:
-                ax.set_title(pname, fontsize=20, fontweight="bold")
+                ax.set_title(name, fontsize=20, fontweight="bold")
 
             if j == 0:
-                ax.set_ylabel(rep_name, fontsize=20, fontweight="bold")
+                ax.set_ylabel(rep_name, fontsize=20, fontweight="bold",)
             else:
                 ax.set_ylabel("")
 
-            ax.set_xlabel("")
-            ax.set_xticks([])
-            ax.set_yticks([])
+            # ax.set_xlabel("")
+            # ax.set_xticks([])
+            # ax.set_yticks([])
 
-    if is_continuous:
-        norm = plt.Normalize(labels.min(), labels.max())
-        sm = plt.cm.ScalarMappable(cmap="viridis", norm=norm)
+            ax.set_xlabel("")
+            if not show_xticks:
+                ax.set_xticks([])
+
+            if not show_yticks:
+                ax.set_yticks([])
+            ax.grid(show_grid)
+
+    if len(continuous_rows) > 0:
+
+        all_values = np.concatenate(continuous_rows)
+        norm = plt.Normalize(all_values.min(), all_values.max(),)
+
+        sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
         sm.set_array([])
 
         cax = fig.add_axes([1.01, 0.12, 0.018, 0.76])
-        # cax = fig.add_axes([0.92, 0.15, 0.02, 0.7])  # [left, bottom, width, height]
         cbar = fig.colorbar(sm, cax=cax)
-        cbar.set_label("Total Clearance", fontsize=22, fontweight="bold")
+        cbar.set_label(cbar_label, fontsize=22, fontweight="bold",)
         cbar.ax.tick_params(labelsize=20)
-        for tick in cbar.ax.get_yticklabels():
-            tick.set_fontweight('bold')
 
-
-    plt.suptitle("2D Projections of Different Representations", fontsize=25, fontweight="bold", y=1.02)
-
+    plt.suptitle(suptitle, fontsize=25, fontweight="bold", y=1.02)
     plt.tight_layout()
     plt.show()
 
