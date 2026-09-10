@@ -16,7 +16,7 @@ from sklearn.feature_selection import mutual_info_regression
 from sklearn.preprocessing import StandardScaler
 from datasets import Dataset
 from sklearn.utils import shuffle
-
+from dataclasses import dataclass, asdict, field
 import torch
 from torch.utils.data import Dataset as Torch_Dataset
 
@@ -366,7 +366,7 @@ class DescriptorsDataset:
                                     partition_col=self.partition_col,
                                     partition_labels=partition_labels
                                     )
-        print(f'Number of train, test and val data: {len(self.partitions['Tr'])}, {len(self.partitions['Te'])}, {len(self.partitions['Val'])}')
+        # print(f'Number of train, test and val data: {len(self.partitions['Tr'])}, {len(self.partitions['Te'])}, {len(self.partitions['Val'])}')
 
     # ----------------------------------------------------
     # Load SMILES and labels
@@ -412,7 +412,7 @@ class DescriptorsDataset:
         optimal_feature =  hierarchical_feature_selection(X_train=X_train, y_train=y_train,
                                                         X_val=X_val, y_val=y_val,
                                                         threshold=0.001, n_estimators=50,
-                                                        random_state=42, col_drop_threshold=0.99,
+                                                        random_state=42,
                                                         criterion="squared_error", max_features="sqrt"
                                                         )
         
@@ -434,6 +434,7 @@ class DescriptorsDataset:
         np.random.seed(20)
 
         print(f'Preprocessing features:')
+        drop_columns = drop_columns+[self.target_column_name]
         X_train = self.partitions[train_partition].drop(columns=drop_columns).select_dtypes(include="number")
         y_train = self.y[train_partition]
 
@@ -719,6 +720,44 @@ class ChemBertDataset:
 
         return datasets
 
+@dataclass
+class GCNDataset_Config:
+
+    # Data reading
+    path_init: str = ''
+    file_name: str = ''
+
+    # Column names
+    smiles_column_name: str = ''
+    target_column_name: str = ''
+    data_split_column_name: str = ''
+
+    # Output
+    graph_dataset_path: str = ''
+    details_filepath: str = ''
+
+    # Dataset preparation
+    graph_backend_version: str = 'new'
+    train_partition: str = 'Tr'
+    partition_labels: list = field(default_factory=lambda: ['Tr', 'Te', 'Val'])
+
+    all_atoms: list = field(default_factory=lambda: ['Br', 'Cl', 'P', 'I', 'F', 'H', 'S', 
+                                                     'N', 'O', 'C', 'B', 'Si', 'Na', 'K'])
+    filters: object = None
+    label_normalised: bool = True
+    force: bool = False
+
+    # GCN features
+    gcn_features_path: str = ''
+
+    @property
+    def log_filepath(self):
+        return f'{self.graph_dataset_path}/data_preparation_logfile.log'
+
+    def __post_init__(self):
+        os.makedirs(self.graph_dataset_path, exist_ok=True)
+        if not self.details_filepath.endswith('.json'):
+            self.details_filepath = f'{self.details_filepath}.json'
 
 class GCNDataset:
     
@@ -728,7 +767,8 @@ class GCNDataset:
                  partition_col="split",
                  max_num_atoms=None,
                  graph_dataset_path="./datasets/graph_dataset",
-                 graph_backend_version = 'old'
+                 graph_backend_version = 'old',
+                 *uncsry_vars, **uncsry_kvars
                  ):
 
         self.df = df_init.copy()
@@ -739,12 +779,14 @@ class GCNDataset:
         self.graph_dataset_path = graph_dataset_path
         self.graph_backend_version = graph_backend_version
 
+        self.datapaths = {}       # label -> dataframe
         self.partitions = {}       # label -> dataframe
         self.smiles = {}           # label -> smiles
         self.y = {}                # label -> labels
 
         self.StandardScaler_labels = None
         self.kwargs = None
+        os.makedirs(self.graph_dataset_path, exist_ok=True)
         
     def load_graph_utils(self):
         
@@ -766,7 +808,7 @@ class GCNDataset:
     # Partition handling
     # ----------------------------------------------------
 
-    def get_partitions(self, partition_labels=['Tr', 'Val', 'Te']):
+    def get_partitions(self, partition_labels=['Tr', 'Val', 'Te'], *uncsry_vars, **uncsry_kvars):
         
         print(f'Partitioning dataset..')
         self.partitions = split_data(self.df,
@@ -778,7 +820,7 @@ class GCNDataset:
     # Atom & column filtering
     # ----------------------------------------------------
 
-    def atom_filter(self, all_atoms={'Br','Cl','P','I','F','H','S','N','O','C','B','Si','Na','K'}):
+    def atom_filter(self, all_atoms={'Br','Cl','P','I','F','H','S','N','O','C','B','Si','Na','K'}, *uncsry_vars, **uncsry_kvars):
         
         
         print('-'*80)
@@ -799,7 +841,7 @@ class GCNDataset:
         print('Done')
         print('-'*80)
 
-    def apply_column_constraints(self, filters):
+    def apply_column_constraints(self, filters, *uncsry_vars, **uncsry_kvars):
         
         if filters:
             print('-'*80)
@@ -823,15 +865,16 @@ class GCNDataset:
     # SMILES and label handling
     # ----------------------------------------------------
     
-    def load_smiles_labels(self, train_partition="Tr", label_normalised=True):
+    def load_smiles_labels(self, train_partition="Tr", label_normalised=True, *uncsry_vars, **uncsry_kvars):
 
         for p, dfp in self.partitions.items():
-            self.smiles[p] = dfp[self.smiles_column_name].tolist()
-            self.y[PARTITION_NAMES.get(p, p.lower())] = np.stack(dfp[self.target_column_name].values)
+            __partion_name = PARTITION_NAMES.get(p, p.lower())
+            self.smiles[__partion_name] = dfp[self.smiles_column_name].tolist()
+            self.y[__partion_name] = np.stack(dfp[self.target_column_name].values)
         
-        scaler_path = f"{self.graph_dataset_path}/StandardScaler_labels.pkl"
-        if not os.path.isfile(scaler_path):
-            os.makedirs(self.graph_dataset_path, exist_ok=True)
+        self.scaler_path = f"{self.graph_dataset_path}/StandardScaler_labels.pkl"
+        if not os.path.isfile(self.scaler_path):
+
             # Fit label scaler only on reference partition
             self.StandardScaler_labels = StandardScaler()
             y_train = ensure_2d(self.y[PARTITION_NAMES.get(train_partition, train_partition)])
@@ -842,21 +885,22 @@ class GCNDataset:
                 self.StandardScaler_labels.mean_ = np.array([0.0])
                 self.StandardScaler_labels.scale_ = np.array([1.0])
         
-            with open(scaler_path, "wb") as fp:
+            with open(self.scaler_path, "wb") as fp:
                 pickle.dump(self.StandardScaler_labels, fp)
                 
-        with open(scaler_path, "rb") as fp:
+        with open(self.scaler_path, "rb") as fp:
             self.StandardScaler_labels = pickle.load(fp)
 
         for p in self.y:
-            Y = self.StandardScaler_labels.transform(ensure_2d(self.y[PARTITION_NAMES.get(p, p.lower())]))
-            self.y[PARTITION_NAMES.get(p, p.lower())] = Y.ravel() if Y.shape[1] == 1 else Y
+            __partion_name = PARTITION_NAMES.get(p, p.lower())
+            Y = self.StandardScaler_labels.transform(ensure_2d(self.y[__partion_name]))
+            self.y[__partion_name] = Y.ravel() if Y.shape[1] == 1 else Y
 
     # ----------------------------------------------------
     # Atom metadata (fit on training split only)
     # ----------------------------------------------------
 
-    def mol_details(self, train_partition, symb_hyb_chirl_file):
+    def mol_details(self, symb_hyb_chirl_file:str, *uncsry_vars, **uncsry_kvars):
 
         if os.path.isfile(symb_hyb_chirl_file):
             print('-'*80)
@@ -880,13 +924,14 @@ class GCNDataset:
     # ----------------------------------------------------
 
     def build_or_load_datasets(self,
-                           symb_hyb_chirl_file,
                            features_list,
                            train_partition='Tr',
-                           force=False):
+                           partition_labels=['Tr', 'Val', 'Te'],
+                           force=False,
+                           *uncsry_vars, **uncsry_kvars
+                           ):
 
         self.load_graph_utils()
-        os.makedirs(self.graph_dataset_path, exist_ok=True)
         out_path = f"{self.graph_dataset_path}/SmilesDataset_graph"
 
         # Atom metadata must be consistent across partitions
@@ -895,16 +940,23 @@ class GCNDataset:
         datasets = {}
         load_kwargs = {"features_list": features_list, "max_num_atoms": self.max_num_atoms}
 
-        for p in self.partitions:
-            pkl_file = f"{self.graph_dataset_path}/SmilesDataset_graph_{PARTITION_NAMES.get(p, p.lower())}.pkl.gz"
+        if partition_labels is None:
+            partition_labels = list(self.partitions.keys())
 
+        partition_labels.remove(train_partition)
+        partition_labels = [train_partition] + partition_labels
+
+        for p in partition_labels:
+            __partition_name = PARTITION_NAMES.get(p, p.lower())
+            pkl_file = f"{self.graph_dataset_path}/SmilesDataset_graph_{__partition_name}.pkl.gz"
+            self.datapaths[__partition_name] = pkl_file
             needs_build = force or not os.path.isfile(pkl_file)
 
             if not needs_build:
                 try:
                     print('-'*80)
-                    print(f'Loading {PARTITION_NAMES.get(p, p.lower()).capitalize()} Graph Data from: {pkl_file}')
-                    datasets[p] = self.GraphData_from_pickle(pkl_file, **load_kwargs)
+                    print(f'Loading {__partition_name.capitalize()} Graph Data from: {pkl_file}')
+                    datasets[__partition_name] = self.GraphData_from_pickle(pkl_file, **load_kwargs)
                     print('Loaded')
                     print('-'*80)
                     continue
@@ -915,15 +967,15 @@ class GCNDataset:
             if needs_build:
                 print('-'*80)
                 print(f'Graph Data not found in: {pkl_file}')
-                print(f"Generating new graph data for {PARTITION_NAMES.get(p, p.lower()).capitalize()}:")
+                print(f"Generating new graph data for {__partition_name.capitalize()}:")
 
-                ds = self.Multirelational_GraphDataset(smi_list=self.smiles[p], labels=self.y[PARTITION_NAMES.get(p, p.lower())], **self.kwargs)
-                self.SmilesDataset_graph_gen(PARTITION_NAMES.get(p, p.lower()), ds, out_path=out_path, mean_std_flag=(p == train_partition))
+                ds = self.Multirelational_GraphDataset(smi_list=self.smiles[__partition_name], labels=self.y[__partition_name], **self.kwargs)
+                self.SmilesDataset_graph_gen(__partition_name, ds, out_path=out_path, mean_std_flag=(p == train_partition))
                 print('Done')
 
                 # Load freshly generated dataset
-                print(f'Loading {PARTITION_NAMES.get(p, p.lower()).capitalize()} Graph Data from: {pkl_file}')
-                datasets[p] = self.GraphData_from_pickle(pkl_file, **load_kwargs)
+                print(f'Loading {__partition_name.capitalize()} Graph Data from: {pkl_file}')
+                datasets[__partition_name] = self.GraphData_from_pickle(pkl_file, **load_kwargs)
                 print('Loaded')
                 print('-'*80)
 
@@ -934,6 +986,7 @@ class GCNDataset:
 
         with open(scaler_path, "rb") as fp:
             self.StandardScaler_labels = pickle.load(fp)
+            self.datapaths['StandardScaler_labels_path'] = scaler_path
 
         return datasets
 
@@ -951,24 +1004,37 @@ class GCNDataset:
                          features_list=['atom_properties','gasteiger_charge','logP_values'],
                          label_normalised=True,
                          force=False,
+                         *uncsry_vars, **uncsry_kvars
                          ):
-        self.mol_details(train_partition, symb_hyb_chirl_file)
+        if train_partition not in self.df[self.partition_col].unique():
+            raise ValueError(f'Train partition - {train_partition} not in data split column - {self.partition_col}')
+        
+            ## To set the maximum number of datapoint containing split as train_partition, uncomment it
+            # __counts = self.df[self.partition_col].value_counts().to_dict()
+            # sorted_splits = sorted(__counts, key=__counts.get, reverse=True)
+            # train_partition = sorted_splits[0]
+            # print(f'Setting train partition column to: {train_partition}')
+
+        self.mol_details(symb_hyb_chirl_file=symb_hyb_chirl_file)
         
         # filtering
         if all_atoms:
-            self.atom_filter(all_atoms)
+            self.atom_filter(all_atoms=all_atoms)
         if filters:
-            self.apply_column_constraints(filters)
+            self.apply_column_constraints(filters=filters)
 
         # partition
-        self.get_partitions(partition_labels)
+        self.get_partitions(partition_labels=partition_labels)
 
         # labels
         self.load_smiles_labels(train_partition=train_partition,
                                 label_normalised=label_normalised)
 
         # build or load
-        datasets = self.build_or_load_datasets(symb_hyb_chirl_file, features_list, train_partition=train_partition, force=force)
+        datasets = self.build_or_load_datasets(features_list=features_list, 
+                                               train_partition=train_partition, 
+                                               partition_labels=partition_labels,
+                                               force=force)
         results = {PARTITION_NAMES.get(p, p.lower()): {"smiles": [datasets[p].get_smiles(i) for i in range(len(datasets[p]))],
                        "dataset": datasets[p]
                        } for p in datasets
@@ -1347,27 +1413,31 @@ class SMILES2GRAPH_Data(Torch_Dataset):
 class SMILES_PRUNING:
     
     def __init__(self,
-                 smiles_list,
-                 labels,
-                 smiles_column_name='smiles',
-                 filters = None,
-                 all_atoms={'Br', 'Cl', 'P', 'I', 'F', 'H', 'S', 'N', 'O', 'C', 'B', 'Si', 'Na', 'K'},
-                 prefix='',
-                 sanitize=True,
-                 strip_salts: bool = False,
+                smiles_list,
+                labels='eval',
+                smiles_column_name='smiles',
+                filters = None,
+                all_atoms={'Br', 'Cl', 'P', 'I', 'F', 'H', 'S', 'N', 'O', 'C', 'B', 'Si', 'Na', 'K'},
+                prefix='',
+
+                sanitize=False,                             ## This should be 'True' for generic use.
+                canonical: bool = False,                    ## This should be 'True' for generic use.
+                normalize_functional_groups: bool = False,  ## This should be 'True' for generic use.
+                sanitize_final: bool = False,               ## This should be 'True' for generic use.
+                remove_explicit_h: bool = False,            ## This should be 'True' for generic use.
+
+                keep_largest_fragment: bool = False,        ## This should be 'True' for generic use.
+                require_organic_fragment: bool = False,     ## This should be 'True' for generic use.
+                disconnect_metals: bool = False,            ## This should be 'True' for generic use.
+                strip_salts: bool = False,                  ## This should be 'True' for generic use.
                 salt_remover_def: Optional[str] = None,
-                keep_largest_fragment: bool = True,
-                require_organic_fragment: bool = True,
-                disconnect_metals: bool = True,
-                normalize_functional_groups: bool = True,
-                reionize: bool = True,
-                uncharge: bool = True,
-                canonicalize_tautomer: bool = True,
-                remove_explicit_h: bool = True,
-                sanitize_final: bool = True,
+                
+                reionize: bool = False,
+                uncharge: bool = False,
+                canonicalize_tautomer: bool = False,
                 kekulize: bool = False,
                 clear_stereo: bool = False,
-                canonical: bool = True,
+
                 return_mol: bool = False,
                 log_flag: bool = False
                  ):

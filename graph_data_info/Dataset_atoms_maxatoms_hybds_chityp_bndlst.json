@@ -1,0 +1,37 @@
+{
+    "max_num_atoms": 70,
+    "atom_symbols": [
+        "Br",
+        "Si",
+        "Cl",
+        "B",
+        "C",
+        "O",
+        "I",
+        "S",
+        "N",
+        "F",
+        "P",
+        "H"
+    ],
+    "hybridization_list": [
+        "S",
+        "SP2",
+        "SP3",
+        "UNSPECIFIED",
+        "SP",
+        "SP3D2"
+    ],
+    "chiraltypes": [
+        "CHI_UNSPECIFIED",
+        "CHI_TETRAHEDRAL_CW",
+        "CHI_TETRAHEDRAL_CCW"
+    ],
+    "bonds_list": [
+        "AROMATIC",
+        "SINGLE",
+        "DOUBLE",
+        "TRIPLE"
+    ],
+    "neighbors_max_len": 6
+}

@@ -35,15 +35,16 @@ from contextlib import contextmanager
 from ordered_set import OrderedSet
 from sklearn.preprocessing import StandardScaler
 from collections import OrderedDict
-from typing import Any, List, Tuple, Union, Callable, Optional, Dict
 from PIL import Image, ImageDraw, ImageFont
+from typing import Any, List, Tuple, Union, Callable, Optional, Dict
+from scipy.stats import pearsonr, spearmanr, kendalltau
 
 from sklearn.model_selection import train_test_split
+from sklearn.svm import SVC, SVR
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import label_binarize
 from sklearn.manifold import MDS, TSNE, Isomap
 from sklearn.decomposition import PCA, KernelPCA, FactorAnalysis, TruncatedSVD
-from sklearn.svm import SVC, SVR
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis as LDA
 from sklearn.metrics import root_mean_squared_error, mean_absolute_error, r2_score
 from sklearn.metrics import (accuracy_score, confusion_matrix,
@@ -611,9 +612,10 @@ def create_folder(folder_name: str) -> str:
         
     return folder_name
 
-def attach_ids(df, prefix, id_col='UNIQUE_ID'):
+def attach_ids(df, prefix, id_col='UNIQUE_ID', width=None):
     df = df.copy()
-    width = get_scale_power(len(df)) + 3
+    if width is None:
+        width = get_scale_power(len(df)) + 3
     if id_col not in df.columns:
         df.insert(0, id_col, 'NA')
     df[id_col] = [f"{prefix}{i:0{width}d}" for i in range(1, len(df) + 1)]
@@ -846,8 +848,6 @@ def save_dict_csv_pandas(dict_name, save_filename='temp_save_filename.csv'):
     _ = create_folder(save_filename[:-len(save_filename.split('/')[-1])])
     pd.DataFrame.from_dict(dict_name).to_csv(save_filename, index=False)
 
-
-
 def save_dict_pickle(dict_, save_filename='temp_save_filename.pkl', protocol=4):
 
     # create folder (if not) 
@@ -855,16 +855,12 @@ def save_dict_pickle(dict_, save_filename='temp_save_filename.pkl', protocol=4):
     with open(save_filename,'wb') as f:
         pickle.dump(dict_, f, protocol=protocol)
 
-
-
 def load_dict_pickle(input_filename):
     
     with open(input_filename,'rb') as f:
         dict_name = pickle.load(f)
 
     return dict_name
-
-
 
 def line_count_csv_file(filename, chunksize=1000):
 
@@ -892,8 +888,6 @@ def read_csv2list(file_path):
 
     return rows, headers
 
-
-
 def read_csv2array(file_path):
 
     file_ = pd.read_csv(file_path)
@@ -915,8 +909,6 @@ def read_csv2dict(file_path):
             i+=1
 
     return read_dict, headers
-
-
 
 def write_csv_columnwise(file_path, file_name, headers = [], column_list = []):
     
@@ -950,8 +942,6 @@ def write_csv_columnwise(file_path, file_name, headers = [], column_list = []):
     file_ = pd.read_csv(save_path)
     return file_
 
-
-
 def write_csv_rowwise(file_path, file_name, rows: list, headers = []):
 
 
@@ -972,8 +962,6 @@ def write_csv_rowwise(file_path, file_name, rows: list, headers = []):
     file_ = pd.read_csv(file_path)
 
     return file_
-
-
 
 def writer_dict_csv(*dicts, headers, file_path, file_name):
 
@@ -1707,6 +1695,7 @@ def plot_projection_grid_seaborn(
     matrices,
     labels,
     rep_names,
+    metric='euclidean',
     cmap="viridis",
     highlight_index=None,
     normalise=True,
@@ -1714,6 +1703,8 @@ def plot_projection_grid_seaborn(
     show_yticks=False,
     show_grid=False,
     figsize=None,
+    fontsize=15,
+    savepath='',
     cbar_label='Fraction unbound value',
     suptitle = "2D Projections of Different Representations",
     proj_names=["PCA", "t-SNE", "UMAP", "Isomap",
@@ -1782,8 +1773,8 @@ def plot_projection_grid_seaborn(
         Xs = StandardScaler().fit_transform(X) if normalise else X
         reducers = {
             "PCA": PCA(n_components=2, random_state=42),
-            "t-SNE": TSNE(n_components=2, perplexity=30, learning_rate="auto", init="pca", random_state=42,),
-            "UMAP": umap.UMAP(n_components=2, n_neighbors=15, min_dist=0.1, random_state=42, ),
+            "t-SNE": TSNE(n_components=2, perplexity=30, learning_rate="auto", init="pca", random_state=42, metric=metric),
+            "UMAP": umap.UMAP(n_components=2, n_neighbors=15, min_dist=0.1, random_state=42, metric=metric),
             "Isomap": Isomap(n_components=2, n_neighbors=15),
             "FactorAnalysis": FactorAnalysis(n_components=2, random_state=42,),
             "MDS": MDS(n_components=2, random_state=42, n_init=1, max_iter=300,),
@@ -1810,10 +1801,10 @@ def plot_projection_grid_seaborn(
                 ax.scatter(Z[highlight_index, 0], Z[highlight_index, 1], color="red", s=20, zorder=5)
 
             if i == 0:
-                ax.set_title(name, fontsize=20, fontweight="bold")
+                ax.set_title(name, fontsize=fontsize, fontweight="bold")
 
             if j == 0:
-                ax.set_ylabel(rep_name, fontsize=20, fontweight="bold",)
+                ax.set_ylabel(rep_name, fontsize=fontsize, fontweight="bold",)
             else:
                 ax.set_ylabel("")
 
@@ -1839,12 +1830,18 @@ def plot_projection_grid_seaborn(
 
         cax = fig.add_axes([1.01, 0.12, 0.018, 0.76])
         cbar = fig.colorbar(sm, cax=cax)
-        cbar.set_label(cbar_label, fontsize=22, fontweight="bold",)
-        cbar.ax.tick_params(labelsize=20)
+        cbar.set_label(cbar_label, fontsize=fontsize, fontweight="bold",)
+        cbar.ax.tick_params(labelsize=fontsize)
 
-    plt.suptitle(suptitle, fontsize=25, fontweight="bold", y=1.02)
+    plt.suptitle(suptitle, fontsize=fontsize+5, fontweight="bold", y=1.02)
     plt.tight_layout()
-    plt.show()
+    if savepath:
+        create_folder(get_dir(savepath))
+        plt.savefig(savepath,  dpi=300)
+        plt.close()
+        print(f'Image saved in: {savepath}')
+    else:
+        plt.show()
 
 
 def plot_3d(
@@ -1989,6 +1986,7 @@ def plot_2d(matrices=None,
             plot_legends = True,
             savepath='',
             return_img=False,
+            legend_ncols=1,
             ):
     """
     Plot 1D or 2D matrices as 2D scatter plots.
@@ -2114,7 +2112,7 @@ def plot_2d(matrices=None,
         plt.ylim(y_lim)
     
     if plot_legends:
-        plt.legend(fontsize=title_fontsize-8, loc=legend_loc, frameon=True)
+        plt.legend(fontsize=title_fontsize-8, loc=legend_loc, frameon=True, ncol=legend_ncols, framealpha=0.7, edgecolor='white', facecolor='white')
     plt.tight_layout()
     
     if savepath:
@@ -4466,7 +4464,8 @@ def regression_test_metrics(y_true: np.ndarray[float] | List[float],
                  transform_func=lambda x: x,
                  fold_transform_fn=lambda x:x,
                  use_log_domain_gmfe=False,
-                 decimals=2
+                 decimals=2,
+                 corr_method='pearson',
             ) -> OrderedDict[str, float]:
     
     '''
@@ -4489,7 +4488,15 @@ def regression_test_metrics(y_true: np.ndarray[float] | List[float],
     mse_test = rmse_test**2
     mae_test = mean_absolute_error(y_true, y_pred)
     r2_val_test = r2_score(y_true, y_pred)
-    pcc = np.corrcoef(y_true, y_pred,)[0, 1]
+    if corr_method == "pearson":
+        pcc, _ = pearsonr(y_true, y_pred)
+    elif corr_method == "spearman":
+        pcc, _ = spearmanr(y_true, y_pred)
+    elif corr_method == "kendall":
+        pcc, _ = kendalltau(y_true, y_pred)
+    else:
+        raise ValueError(f"Unknown method '{corr_method}'. Choose from "
+                         "['pearson', 'spearman', 'kendall'].")
     
     fold2, _, _ = percentage_within_fold_change(y_true=y_true, y_pred=y_pred, fold=2, transform_func=fold_transform_fn)
     fold3, _, _ = percentage_within_fold_change(y_true=y_true, y_pred=y_pred, fold=3, transform_func=fold_transform_fn)

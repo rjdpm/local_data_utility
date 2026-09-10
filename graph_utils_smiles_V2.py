@@ -263,7 +263,9 @@ class GraphData_from_pickle(Dataset):
     
     def __init__(self,
                  dataset_path,
-                 features_list,
+                 features_list=["atomic_num", "degree", "total_degree", "formal_charge", "total_num_Hs",
+                                "explicit_valence", "implicit_valence", "total_valence", "num_explicit_Hs",
+                                "num_implicit_Hs", "mass", "num_pi_electrons",],
                  max_num_atoms=65,
                  padding=True
                  ):
@@ -280,9 +282,11 @@ class GraphData_from_pickle(Dataset):
         filename = '/'.join(dataset_path.split('/')[:-1]+['dataset_mean.pkl'])
         with open(filename, 'rb') as fp:
             self.dataset_mean = pickle.load(fp)
+            self.dataset_mean_path = filename
         filename = '/'.join(dataset_path.split('/')[:-1]+['dataset_std.pkl'])
         with open(filename, 'rb') as fp:
             self.dataset_std = pickle.load(fp)
+            self.dataset_std_path = filename
             
         self.mean = np.concatenate([self.dataset_mean[k] for k in self.features_list],axis=0)
         self.std = np.concatenate([self.dataset_std[k] for k in self.features_list],axis=0)

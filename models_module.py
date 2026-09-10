@@ -11,7 +11,7 @@ from torchinfo import summary
 import torch.nn.functional as F
 from torchvision.models import mobilenet_v3_large
 from torchvision.models import resnet18
-from transformers import ViTModel, ViTFeatureExtractor
+from transformers import ViTModel
 from transformers import RobertaModel, RobertaPreTrainedModel
 from transformers import AutoModel, AutoConfig
 

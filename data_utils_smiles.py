@@ -4,7 +4,7 @@ import os
 import ast
 import sys
 import math
-import copy
+import copy, gzip
 import numpy as np
 import pandas as pd
 from PIL import Image
@@ -446,7 +446,10 @@ def plot_molecule(
     # =========================================================
     # Create molecule
     # =========================================================
-    mol = Chem.MolFromSmiles(smiles, sanitize=sanitize)
+    if isinstance(smiles, str):
+        mol = Chem.MolFromSmiles(smiles, sanitize=sanitize)
+    else:
+        mol = smiles
 
     if mol is None:
         raise ValueError("Invalid SMILES string.")
@@ -642,7 +645,7 @@ def fig_to_image(fig, dpi=100):
 def plot_smiles_grid(smiles_list: List[str],
                      legends: List[str]=None,
                      titles: List[str]=None,
-                     cols: int = 8,
+                     cols: int = 5,
                      image_size: Tuple[int,int] = (400, 400),
                      figsize: Tuple[int,int] = None,
                      savepath: str = '',
@@ -686,7 +689,11 @@ def plot_smiles_grid(smiles_list: List[str],
     for i, ax in enumerate(axs):
         if i < num_molecules:
             smiles = smiles_list[i]
-            mol = Chem.MolFromSmiles(smiles)
+
+            if isinstance(smiles, str):
+                mol = Chem.MolFromSmiles(smiles)
+            else:
+                mol = smiles
             if mol:
                 img = mol_to_image_with_font(mol,
                                              size=image_size,
@@ -748,9 +755,7 @@ def plot_smiles_grid(smiles_list: List[str],
 
     if savepath:
         path = savepath.split('/')[:-1]
-        print(path)
         path = '/'.join(path)
-        print(path)
         create_folder(path)
         plt.savefig(savepath, dpi=300, bbox_inches='tight')
         print(f'Figure saved in: {savepath}')
@@ -1240,7 +1245,10 @@ def visualize_morgan_fp_bits(bit_indices: List[int],
                              smiles_list: List[str],
                              radius: int = 2,
                              nBits: int = 1024,
-                             molsPerRow: int = 4
+                             molsPerRow: int = 4,
+                             save_path:str = None,
+                             dpi:int = 600
+
                              ) -> Image.Image:
     '''
     Task: 
@@ -1269,22 +1277,30 @@ def visualize_morgan_fp_bits(bit_indices: List[int],
 
     # Drawing options
     options = rdMolDraw2D.MolDrawOptions()
-    options.legendFontSize = 25
+    options.legendFontSize = 40
+    options.bondLineWidth = 4
+    # options.highlightBondWidthMultiplier = 16
+    options.maxFontSize = 60
+    options.minFontSize = 50
+
     if tpls:
     # Generate the image
         img = Draw.DrawMorganBits(
             tpls=tpls,
             molsPerRow=molsPerRow,
             legends=['MorganFP_' + str(bit) for bit in bit_indices],
-            subImgSize=(350, 350),
-            baseRad=0.3,
+            subImgSize=(500, 500),
+            baseRad=0.4,
             useSVG=False,
             aromaticColor=(0.1, 1, 1),
             ringColor=(1, 0.1, 1),
             centerColor=(1, 0, 0),
-            extraColor=(0.9, 0.9, 0.9),
+            extraColor=(0.95, 0.95, 0.95),
             drawOptions=options
         )
+
+        if save_path is not None:
+            img.save(save_path, dpi=(dpi, dpi))
 
         return img
     else:
@@ -1307,7 +1323,9 @@ def calculate_properties(smiles: str) -> Dict[str, Any]:
         "VSA_EState3": Descriptors.VSA_EState3(mol),
         "NHOHCount": Descriptors.NHOHCount(mol),
         "NumHDonors": Descriptors.NumHDonors(mol),
-        "MolLogP": Descriptors.MolLogP(mol)
+        "NumHAcceptor": Descriptors.NumHAcceptors(mol),
+        "NumRotatableBonds":Descriptors.NumRotatableBonds(mol),
+        "MolLogP": Descriptors.MolLogP(mol),
     }
     
     calc = Calculator(descriptors, ignore_3D=True)
@@ -1931,7 +1949,7 @@ def df_group_duplicates(df: pd.DataFrame,
         df_grouped = df[[reference_col]].copy()
         
     for col in target_cols:
-        df_grouped[f'{col.replace(' ', '_')}_list'] = df[reference_col].map(df.groupby(reference_col)[col].apply(list).to_dict())
+        df_grouped[f"{col.replace(' ', '_')}_list"] = df[reference_col].map(df.groupby(reference_col)[col].apply(list).to_dict())
     if drop_duplicates:
         df_grouped = df_grouped.drop_duplicates(subset=reference_col, keep='first').reset_index(drop=True)
 
@@ -1959,10 +1977,10 @@ def df2cleandf(df: pd.DataFrame,
     df_grouped['Cannonicalized_SMILES'] = df['Cannonicalized_SMILES'] = df[smi_col_name].apply(canonicalize_smiles)
     if columns_to_list:
         for col in columns_to_list:
-            df_grouped[f'{col.replace(' ', '_')}_list'] = df['Cannonicalized_SMILES'].map(df.groupby('Cannonicalized_SMILES')[col].apply(list).to_dict())
+            df_grouped[f"{col.replace(' ', '_')}_list"] = df['Cannonicalized_SMILES'].map(df.groupby('Cannonicalized_SMILES')[col].apply(list).to_dict())
     
-    target_col_rename = f'{target_col.replace(' ', '_')}_list'
-    df_grouped[f'{smi_col_name}_list'] = df_grouped['Cannonicalized_SMILES'].map(df_grouped.groupby('Cannonicalized_SMILES')[smi_col_name].apply(list).to_dict())
+    target_col_rename = f"{target_col.replace(' ', '_')}_list"
+    df_grouped[f"{smi_col_name}_list"] = df_grouped['Cannonicalized_SMILES'].map(df_grouped.groupby('Cannonicalized_SMILES')[smi_col_name].apply(list).to_dict())
     df_grouped[target_col_rename] = df_grouped['Cannonicalized_SMILES'].map(df_grouped.groupby('Cannonicalized_SMILES')[target_col].apply(list).to_dict())
     df_grouped = df_grouped.drop_duplicates(subset='Cannonicalized_SMILES', keep='first').reset_index(drop=True)
     df_grouped = df_grouped.drop(columns=[target_col])
@@ -2585,5 +2603,28 @@ def nearest_neighbours(X_train, X_query, n_neighbors=1):
     return indices, distances, nn_tree
     
 
+def sdf_to_df(filepath):
+    
+    if filepath.endswith('.gz'):
+        with gzip.open(filepath, "rb") as f:
+            suppl = Chem.ForwardSDMolSupplier(f)
+            mols = [mol for mol in suppl if mol is not None]
+    else:
+        suppl = Chem.ForwardSDMolSupplier(filepath)
+        mols = [mol for mol in suppl if mol is not None]
 
+    # # Step 2: Extract data
+    records = []
+    for mol in mols:
+        data = {}
+        data["SMILES"] = Chem.MolToSmiles(mol)
+        # data["Name"] = mol.GetProp("_Name") if mol.HasProp("_Name") else ""
+        for prop in mol.GetPropNames():
+            data[prop] = mol.GetProp(prop)
+        records.append(data)
+
+    # Step 3: Save to CSV
+    df = pd.DataFrame(records)
+    
+    return df, mols
 
